@@ -1,0 +1,19 @@
+# poker_app/docker-compose.yml
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: poker_db
+    restart: always
+    ports:
+      # ホストPCの5432ポートとコンテナの5432ポートを接続
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=poker_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
