@@ -1,35 +1,34 @@
 // backend/src/main.rs
 
+// ... 既存のuse宣言 ...
 use axum::{
-    Json,
-    Router,
-    extract::State, // 共有データをハンドラで受け取るために必要
+    Json, Router,
+    extract::State,
     http::StatusCode,
-    routing::{get, post}, // POSTリクエストを扱うために追加
+    routing::{get, post},
 };
-use serde::{Deserialize, Serialize}; // Deserializeを追加
-use std::net::SocketAddr;
-use tower_http::cors::{Any, CorsLayer};
-
-// sqlx を使ってPostgreSQLに接続するためのライブラリ
+use dotenvy::dotenv;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-
-// .env ファイルを読み込むためのライブラリ
-use dotenvy::dotenv;
 use std::env;
+use std::net::SocketAddr;
+use tower_http::cors::{Any, CorsLayer};
+use uuid::Uuid;
 
-// Tokioを非同期ランタイムとしてメイン関数を定義する
+// ★ ユーザー情報を格納する構造体を追加
+#[derive(Serialize, sqlx::FromRow)]
+struct User {
+    id: uuid::Uuid,
+    username: String,
+    password_hash: String,
+}
+
+// ... main関数 ...
 #[tokio::main]
 async fn main() {
-    // .env ファイルから環境変数を読み込む
     dotenv().ok();
-
-    // データベース接続URLを環境変数から取得
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-
-    // データベース接続プールを作成
-    // PgPoolは複数のDB接続を効率的に管理してくれる
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
@@ -43,13 +42,12 @@ async fn main() {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // ルーティングを定義
     let app = Router::new()
         .route("/api/health", get(health_check))
-        // POSTリクエストで "/api/register" にアクセスされたら register 関数を呼ぶ
         .route("/api/register", post(register))
+        // ★ ログイン用のルートを追加
+        .route("/api/login", post(login))
         .layer(cors)
-        // .with_state を使って、すべてのハンドラでDB接続プールを共有する
         .with_state(pool);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8000));
@@ -59,18 +57,21 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-// フロントエンドから受け取るJSONの型を定義
+// ... RegisterUser 構造体 ...
+// ★ ログイン用に使い回すため、名前を UserAuth に変更
 #[derive(Deserialize)]
-struct RegisterUser {
+struct UserAuth {
     username: String,
     password: String,
 }
 
-// ユーザー登録の処理を行うハンドラ関数
+// ... register関数 ...
+// ★ 引数の型を UserAuth に変更
 async fn register(
-    State(pool): State<PgPool>,        // 共有しているDB接続プールを受け取る
-    Json(payload): Json<RegisterUser>, // 送られてきたJSONを RegisterUser 型に変換して受け取る
+    State(pool): State<PgPool>,
+    Json(payload): Json<UserAuth>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    // ... (関数の中身は変更なし) ...
     println!("Registering user: {}", payload.username);
 
     // パスワードをハッシュ化する (コスト=12は推奨される強度)
@@ -118,7 +119,61 @@ async fn register(
     }
 }
 
-// health_check関数は変更なし
+// ★ ログイン処理を行うハンドラ関数を追加
+async fn login(
+    State(pool): State<PgPool>,
+    Json(payload): Json<UserAuth>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    println!("Logging in user: {}", payload.username);
+
+    // 1. ユーザー名でデータベースからユーザーを検索
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
+        .bind(&payload.username)
+        .fetch_optional(&pool)
+        .await
+    {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            // ユーザーが見つからない場合は認証失敗
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Invalid username or password".to_string(),
+            ));
+        }
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            ));
+        }
+    };
+
+    // 2. パスワードのハッシュを検証
+    let is_valid = match bcrypt::verify(&payload.password, &user.password_hash) {
+        Ok(v) => v,
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to verify password".to_string(),
+            ));
+        }
+    };
+
+    if is_valid {
+        // 3. パスワードが正しければ成功
+        println!("User {} logged in successfully", payload.username);
+        Ok(StatusCode::OK) // 200 OK
+    } else {
+        // 4. パスワードが間違っていれば認証失敗
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid username or password".to_string(),
+        ))
+    }
+}
+
+// ... health_check関数 (変更なし) ...
 #[derive(Serialize)]
 struct HealthStatus {
     status: String,
