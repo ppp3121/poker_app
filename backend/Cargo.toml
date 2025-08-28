@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 axum = "0.8.4"
-axum-extra = "0.10.1"
+axum-extra = { version = "0.10.1", features = ["cookie", "typed-header"] }
 bcrypt = "0.17.1"
 chrono = { version = "0.4.38", features = ["serde"] }
 dotenvy = "0.15.7"

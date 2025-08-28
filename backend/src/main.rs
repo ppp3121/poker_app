@@ -2,15 +2,14 @@
 
 // ... 既存のuse宣言 ...
 use axum::{
-    Json, Router,
+    Json,
+    Router,
     extract::State,
     http::StatusCode,
+    response::{IntoResponse, Response}, // IntoResponse と Response を axum::response からインポート
     routing::{get, post},
 };
-use axum_extra::{
-    TypedHeader,
-    headers::{Authorization, Cookie, authorization::Bearer},
-};
+use axum_extra::extract::cookie::{Cookie, SameSite};
 use chrono::{Duration, Utc};
 use dotenvy::dotenv;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -20,7 +19,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
-use uuid::Uuid;
+// use uuid::Uuid;
 
 // ★ ユーザー情報を格納する構造体を追加
 #[derive(Serialize, sqlx::FromRow)]
@@ -136,8 +135,7 @@ async fn register(
 async fn login(
     State(pool): State<PgPool>,
     Json(payload): Json<UserAuth>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // ★ 戻り値の型を変更
+) -> Result<Response, (StatusCode, String)> {
     println!("Logging in user: {}", payload.username);
 
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
@@ -193,11 +191,12 @@ async fn login(
         })?;
 
         // ★ Cookieを作成
-        let cookie = axum_extra::headers::Cookie::new("token", token)
-            .with_path("/")
-            .with_http_only(true)
-            .with_secure(false) // 開発環境なのでfalse。本番ではtrue
-            .with_same_site(axum_extra::headers::SameSite::Lax);
+        let cookie = Cookie::build(("token", token))
+            .path("/")
+            .http_only(true)
+            .secure(false) // 開発環境なのでfalse。本番ではtrue
+            .same_site(SameSite::Lax)
+            .build();
 
         // ★ Cookieをヘッダーにセットしてレスポンスを返す
         let mut response = StatusCode::OK.into_response();
