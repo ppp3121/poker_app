@@ -1,8 +1,13 @@
 'use client';
 
 import { useState, FormEvent } from 'react';
+// ★ useUserStoreをインポート
+import { useUserStore } from '@/store/userStore';
 
 export default function LoginPage() {
+  // ★ Zustandストアからloginアクションを取得
+  const { login } = useUserStore();
+
   const [username, setUsername] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [message, setMessage] = useState<string>('');
@@ -16,7 +21,6 @@ export default function LoginPage() {
     setMessage('');
 
     try {
-      // RustサーバーのログインAPIエンドポイントを叩く
       const response = await fetch('http://localhost:8000/api/login', {
         method: 'POST',
         headers: {
@@ -32,10 +36,17 @@ export default function LoginPage() {
         );
       }
 
-      // ★ 成功メッセージを変更
       setMessage('ログインに成功しました！');
-      setUsername('');
-      setPassword('');
+
+      // ★ ログイン成功時にストアの状態を更新
+      login(username);
+
+      // フォームのクリアは少し遅らせると成功メッセージが見やすい
+      setTimeout(() => {
+        setUsername('');
+        setPassword('');
+      }, 1500);
+
 
     } catch (err: unknown) {
       if (err instanceof Error) {
