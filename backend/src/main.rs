@@ -1,15 +1,12 @@
-// backend/src/main.rs
-
-// ... 既存のuse宣言 ...
+use async_trait::async_trait;
 use axum::{
-    Json,
-    Router,
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response}, // IntoResponse と Response を axum::response からインポート
+    Json, Router,
+    extract::{FromRequestParts, State},
+    http::{StatusCode, request::Parts},
+    response::IntoResponse,
     routing::{get, post},
 };
-use axum_extra::extract::cookie::{Cookie, SameSite};
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::{Duration, Utc};
 use dotenvy::dotenv;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -19,9 +16,9 @@ use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
-// use uuid::Uuid;
 
-// ★ ユーザー情報を格納する構造体を追加
+// --- 構造体の定義 ---
+
 #[derive(Serialize, sqlx::FromRow)]
 struct User {
     id: uuid::Uuid,
@@ -29,14 +26,54 @@ struct User {
     password_hash: String,
 }
 
-// ★ JWTのクレーム（中身）を定義する構造体
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    sub: String, // ユーザー名
-    exp: usize,  // 有効期限
+    sub: String,
+    exp: usize,
 }
 
-// ... main関数 ...
+#[derive(Deserialize)]
+struct UserAuth {
+    username: String,
+    password: String,
+}
+
+// --- JWT Claims Extractor ---
+
+#[async_trait]
+impl<S> FromRequestParts<S> for Claims
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        // CookieJar extractorを使ってリクエストからクッキーを安全に抽出
+        let jar = CookieJar::from_request_parts(parts, _state)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Cookie handling error".to_string(),
+                )
+            })?;
+
+        let token = jar
+            .get("token")
+            .map(|c| c.value().to_string())
+            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing token".to_string()))?;
+
+        let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+        let decoding_key = DecodingKey::from_secret(secret.as_ref());
+
+        decode::<Claims>(&token, &decoding_key, &Validation::default())
+            .map(|data| data.claims)
+            .map_err(|err| (StatusCode::UNAUTHORIZED, format!("Invalid token: {}", err)))
+    }
+}
+
+// --- メイン関数 ---
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -49,16 +86,22 @@ async fn main() {
 
     println!("Database connected successfully.");
 
+    // CORSの設定を見直し
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(
+            "http://localhost:3000"
+                .parse::<axum::http::HeaderValue>()
+                .unwrap(),
+        )
+        .allow_credentials(true) // Cookieをやりとりするために必要
         .allow_methods(Any)
         .allow_headers(Any);
 
     let app = Router::new()
         .route("/api/health", get(health_check))
         .route("/api/register", post(register))
-        // ★ ログイン用のルートを追加
         .route("/api/login", post(login))
+        .route("/api/me", get(get_me))
         .layer(cors)
         .with_state(pool);
 
@@ -69,24 +112,14 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-// ... RegisterUser 構造体 ...
-// ★ ログイン用に使い回すため、名前を UserAuth に変更
-#[derive(Deserialize)]
-struct UserAuth {
-    username: String,
-    password: String,
-}
+// --- API ハンドラ ---
 
-// ... register関数 ...
-// ★ 引数の型を UserAuth に変更
 async fn register(
     State(pool): State<PgPool>,
     Json(payload): Json<UserAuth>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // ... (関数の中身は変更なし) ...
+    // (この関数は変更なし)
     println!("Registering user: {}", payload.username);
-
-    // パスワードをハッシュ化する (コスト=12は推奨される強度)
     let password_hash = match bcrypt::hash(&payload.password, 12) {
         Ok(h) => h,
         Err(_) => {
@@ -96,33 +129,22 @@ async fn register(
             ));
         }
     };
-
-    // SQLを使ってDBにユーザーを挿入する
-    // sqlx::query! マクロはコンパイル時にSQLの構文をチェックしてくれるので安全
-    let result = sqlx::query!(
+    match sqlx::query!(
         "INSERT INTO users (username, password_hash) VALUES ($1, $2)",
         payload.username,
         password_hash
     )
     .execute(&pool)
-    .await;
-
-    match result {
-        // 成功した場合
-        Ok(_) => Ok(StatusCode::CREATED), // 201 Created ステータスを返す
-        // 失敗した場合
+    .await
+    {
+        Ok(_) => Ok(StatusCode::CREATED),
         Err(e) => {
             eprintln!("Failed to execute query: {}", e);
-            // ユーザー名が重複している場合のエラーを判定
             if let Some(db_err) = e.as_database_error() {
                 if db_err.is_unique_violation() {
-                    return Err((
-                        StatusCode::CONFLICT, // 409 Conflict
-                        "Username already exists".to_string(),
-                    ));
+                    return Err((StatusCode::CONFLICT, "Username already exists".to_string()));
                 }
             }
-            // その他のDBエラー
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Database error".to_string(),
@@ -131,13 +153,10 @@ async fn register(
     }
 }
 
-// ★ ログイン処理を行うハンドラ関数を追加
 async fn login(
     State(pool): State<PgPool>,
     Json(payload): Json<UserAuth>,
-) -> Result<Response, (StatusCode, String)> {
-    println!("Logging in user: {}", payload.username);
-
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
         .bind(&payload.username)
         .fetch_optional(&pool)
@@ -158,23 +177,11 @@ async fn login(
         }
     };
 
-    let is_valid = match bcrypt::verify(&payload.password, &user.password_hash) {
-        Ok(v) => v,
-        Err(_) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to verify password".to_string(),
-            ));
-        }
-    };
-
-    if is_valid {
-        // ★ JWTを生成する処理
+    if bcrypt::verify(&payload.password, &user.password_hash).unwrap_or(false) {
         let now = Utc::now();
-        let iat = now.timestamp() as usize;
-        let exp = (now + Duration::hours(24)).timestamp() as usize; // 24時間有効
+        let exp = (now + Duration::hours(24)).timestamp() as usize;
         let claims = Claims {
-            sub: user.username.clone(),
+            sub: user.username,
             exp,
         };
         let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
@@ -190,21 +197,15 @@ async fn login(
             )
         })?;
 
-        // ★ Cookieを作成
         let cookie = Cookie::build(("token", token))
             .path("/")
             .http_only(true)
-            .secure(false) // 開発環境なのでfalse。本番ではtrue
+            .secure(false)
             .same_site(SameSite::Lax)
             .build();
 
-        // ★ Cookieをヘッダーにセットしてレスポンスを返す
-        let mut response = StatusCode::OK.into_response();
-        response.headers_mut().insert(
-            axum::http::header::SET_COOKIE,
-            cookie.to_string().parse().unwrap(),
-        );
-        Ok(response)
+        let jar = CookieJar::new().add(cookie);
+        Ok((StatusCode::OK, jar))
     } else {
         Err((
             StatusCode::UNAUTHORIZED,
@@ -213,7 +214,10 @@ async fn login(
     }
 }
 
-// ... health_check関数 ...
+async fn get_me(claims: Claims) -> Json<Claims> {
+    Json(claims)
+}
+
 #[derive(Serialize)]
 struct HealthStatus {
     status: String,
