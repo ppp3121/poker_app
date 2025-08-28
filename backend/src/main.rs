@@ -7,7 +7,13 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use axum_extra::{
+    TypedHeader,
+    headers::{Authorization, Cookie, authorization::Bearer},
+};
+use chrono::{Duration, Utc};
 use dotenvy::dotenv;
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -22,6 +28,13 @@ struct User {
     id: uuid::Uuid,
     username: String,
     password_hash: String,
+}
+
+// ★ JWTのクレーム（中身）を定義する構造体
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String, // ユーザー名
+    exp: usize,  // 有効期限
 }
 
 // ... main関数 ...
@@ -123,10 +136,10 @@ async fn register(
 async fn login(
     State(pool): State<PgPool>,
     Json(payload): Json<UserAuth>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // ★ 戻り値の型を変更
     println!("Logging in user: {}", payload.username);
 
-    // 1. ユーザー名でデータベースからユーザーを検索
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
         .bind(&payload.username)
         .fetch_optional(&pool)
@@ -134,14 +147,12 @@ async fn login(
     {
         Ok(Some(user)) => user,
         Ok(None) => {
-            // ユーザーが見つからない場合は認証失敗
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "Invalid username or password".to_string(),
             ));
         }
-        Err(e) => {
-            eprintln!("Database error: {}", e);
+        Err(_) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Database error".to_string(),
@@ -149,7 +160,6 @@ async fn login(
         }
     };
 
-    // 2. パスワードのハッシュを検証
     let is_valid = match bcrypt::verify(&payload.password, &user.password_hash) {
         Ok(v) => v,
         Err(_) => {
@@ -161,11 +171,42 @@ async fn login(
     };
 
     if is_valid {
-        // 3. パスワードが正しければ成功
-        println!("User {} logged in successfully", payload.username);
-        Ok(StatusCode::OK) // 200 OK
+        // ★ JWTを生成する処理
+        let now = Utc::now();
+        let iat = now.timestamp() as usize;
+        let exp = (now + Duration::hours(24)).timestamp() as usize; // 24時間有効
+        let claims = Claims {
+            sub: user.username.clone(),
+            exp,
+        };
+        let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_ref()),
+        )
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create token".to_string(),
+            )
+        })?;
+
+        // ★ Cookieを作成
+        let cookie = axum_extra::headers::Cookie::new("token", token)
+            .with_path("/")
+            .with_http_only(true)
+            .with_secure(false) // 開発環境なのでfalse。本番ではtrue
+            .with_same_site(axum_extra::headers::SameSite::Lax);
+
+        // ★ Cookieをヘッダーにセットしてレスポンスを返す
+        let mut response = StatusCode::OK.into_response();
+        response.headers_mut().insert(
+            axum::http::header::SET_COOKIE,
+            cookie.to_string().parse().unwrap(),
+        );
+        Ok(response)
     } else {
-        // 4. パスワードが間違っていれば認証失敗
         Err((
             StatusCode::UNAUTHORIZED,
             "Invalid username or password".to_string(),
@@ -173,7 +214,7 @@ async fn login(
     }
 }
 
-// ... health_check関数 (変更なし) ...
+// ... health_check関数 ...
 #[derive(Serialize)]
 struct HealthStatus {
     status: String,
