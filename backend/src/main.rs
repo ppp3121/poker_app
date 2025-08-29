@@ -93,7 +93,7 @@ async fn main() {
                 .parse::<axum::http::HeaderValue>()
                 .unwrap(),
         )
-        .allow_credentials(true) // Cookieをやりとりするために必要
+        .allow_credentials(true) // Cookieをやり取りするために必要
         .allow_methods(Any)
         .allow_headers(Any);
 
@@ -202,7 +202,7 @@ async fn login(
             .http_only(true)
             .secure(false)
             .same_site(SameSite::Lax)
-            .build();
+            .build(); // .build() じゃないと警告出るからbuildで、finishはダメintoはもっとダメ、エラー出る
 
         let jar = CookieJar::new().add(cookie);
         Ok((StatusCode::OK, jar))
