@@ -1,10 +1,9 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-// ★ AuthStatusコンポーネントをインポート
 import AuthStatus from "@/components/AuthStatus";
 import Link from "next/link";
-
+import AuthInitializer from "@/components/AuthInitializer";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -31,7 +30,8 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        {/* ★ ヘッダーを追加 */}
+        <AuthInitializer />
+
         <header style={{ padding: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #333' }}>
           <Link href="/" style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>
             Poker App
