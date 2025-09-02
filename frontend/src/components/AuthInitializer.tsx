@@ -1,52 +1,40 @@
 'use client';
 
 import { useUserStore } from '@/store/userStore';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 
-// このコンポーネントはUIを持たず、アプリの初期化ロジックのみを担当します
 export default function AuthInitializer() {
-  const { login, logout } = useUserStore();
-  const [initialized, setInitialized] = useState(false);
+  // ★ setInitializedアクションを取得
+  const { login, logout, setInitialized } = useUserStore();
 
   useEffect(() => {
-    // 一度だけ実行されるようにする
-    if (initialized) {
-      return;
-    }
-    setInitialized(true);
-
+    // このuseEffectはマウント時に一度だけ実行される
     const checkAuthStatus = async () => {
       try {
-        // Cookieを自動で送信してユーザー情報を取得
         const response = await fetch('http://localhost:8000/api/me', {
-          // GETリクエストではbodyは不要
-          method: 'GET',
-          headers: {
-            // Content-TypeもGETでは通常不要ですが、念のため
-            'Content-Type': 'application/json',
-          },
           credentials: 'include',
         });
 
         if (response.ok) {
           const data = await response.json();
-          // バックエンドのClaims構造体のsubフィールドからユーザー名を取得
           if (data.sub) {
             login(data.sub);
           }
         } else {
-          // 401 Unauthorizedなど、セッションが無効な場合はログアウト状態にする
           logout();
         }
       } catch (error) {
         console.error('認証状態の確認に失敗しました:', error);
         logout();
+      } finally {
+        // ★ APIへの問い合わせが成功しても失敗しても、初期化は完了したとマークする
+        setInitialized(true);
       }
     };
 
     checkAuthStatus();
-  }, [initialized, login, logout]);
+    // ★ 依存配列から不要なものを削除し、初回マウント時のみ実行されるようにする
+  }, [login, logout, setInitialized]);
 
-  // このコンポーネントは何もレンダリングしない
   return null;
 }
