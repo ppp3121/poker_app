@@ -1,4 +1,4 @@
-use async_trait::async_trait;
+use axum::http::{Method, header};
 use axum::{
     Json, Router,
     extract::{FromRequestParts, State},
@@ -40,7 +40,6 @@ struct UserAuth {
 
 // --- JWT Claims Extractor ---
 
-#[async_trait]
 impl<S> FromRequestParts<S> for Claims
 where
     S: Send + Sync,
@@ -86,7 +85,7 @@ async fn main() {
 
     println!("Database connected successfully.");
 
-    // CORSの設定を見直し
+    // CORSの設定
     let cors = CorsLayer::new()
         .allow_origin(
             "http://localhost:3000"
@@ -94,9 +93,10 @@ async fn main() {
                 .unwrap(),
         )
         .allow_credentials(true) // Cookieをやり取りするために必要
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_methods(vec![Method::GET, Method::POST])
+        .allow_headers(vec![header::CONTENT_TYPE]);
 
+    // ルーターの設定
     let app = Router::new()
         .route("/api/health", get(health_check))
         .route("/api/register", post(register))
@@ -118,7 +118,6 @@ async fn register(
     State(pool): State<PgPool>,
     Json(payload): Json<UserAuth>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // (この関数は変更なし)
     println!("Registering user: {}", payload.username);
     let password_hash = match bcrypt::hash(&payload.password, 12) {
         Ok(h) => h,
