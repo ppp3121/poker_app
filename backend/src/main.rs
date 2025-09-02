@@ -101,6 +101,7 @@ async fn main() {
         .route("/api/health", get(health_check))
         .route("/api/register", post(register))
         .route("/api/login", post(login))
+        .route("/api/logout", post(logout))
         .route("/api/me", get(get_me))
         .layer(cors)
         .with_state(pool);
@@ -211,6 +212,23 @@ async fn login(
             "Invalid username or password".to_string(),
         ))
     }
+}
+
+async fn logout() -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Cookieを即座に無効にするために、過去の時間を設定
+    let past_time = time::OffsetDateTime::UNIX_EPOCH;
+
+    // 中身を空にし、有効期限を過去に設定したCookieを作成
+    let cookie = Cookie::build(("token", ""))
+        .path("/")
+        .http_only(true)
+        .secure(false) // 開発環境。本番環境ではtrueに
+        .same_site(SameSite::Lax)
+        .expires(past_time) // expires を使って有効期限を過去にする
+        .build();
+
+    let jar = CookieJar::new().add(cookie);
+    Ok((StatusCode::OK, jar, "Logged out successfully"))
 }
 
 async fn get_me(claims: Claims) -> Json<Claims> {

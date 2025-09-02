@@ -6,12 +6,27 @@ import Link from 'next/link';
 export default function AuthStatus() {
   const { isLoggedIn, username, logout } = useUserStore();
 
+  const handleLogout = async () => {
+    try {
+      // バックエンドにログアウトAPIをコール
+      await fetch('http://localhost:8000/api/logout', {
+        method: 'POST',
+        credentials: 'include', // Cookie操作のために必要
+      });
+    } catch (error) {
+      console.error('Logout failed', error);
+    } finally {
+      // APIの成否にかかわらず、フロントエンドの状態はクリアする
+      logout();
+    }
+  };
+
   if (isLoggedIn) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
         <Link href="/mypage">マイページ</Link>
         <p>ようこそ、{username}さん</p>
-        <button onClick={logout} style={{ padding: '0.5rem 1rem' }}>
+        <button onClick={handleLogout} style={{ padding: '0.5rem 1rem' }}>
           ログアウト
         </button>
       </div>
