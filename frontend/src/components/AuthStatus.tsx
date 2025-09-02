@@ -9,6 +9,7 @@ export default function AuthStatus() {
   if (isLoggedIn) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+        <Link href="/mypage">マイページ</Link>
         <p>ようこそ、{username}さん</p>
         <button onClick={logout} style={{ padding: '0.5rem 1rem' }}>
           ログアウト
