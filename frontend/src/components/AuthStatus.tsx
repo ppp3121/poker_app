@@ -18,12 +18,16 @@ export default function AuthStatus() {
     } finally {
       // APIの成否にかかわらず、フロントエンドの状態はクリアする
       logout();
+      //ログアウト後はトップページに移動
+      window.location.href = '/';
     }
   };
 
   if (isLoggedIn) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+        <Link href="/lobby">ロビー</Link>
+        <Link href="/createroom">ルーム作成</Link>
         <Link href="/mypage">マイページ</Link>
         <p>ようこそ、{username}さん</p>
         <button onClick={handleLogout} style={{ padding: '0.5rem 1rem' }}>
@@ -32,6 +36,7 @@ export default function AuthStatus() {
       </div>
     );
   }
+
 
   return (
     <div style={{ display: 'flex', gap: '1rem' }}>
