@@ -15,6 +15,7 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::net::SocketAddr;
+use time;
 use tower_http::cors::{Any, CorsLayer};
 
 // --- 構造体の定義 ---
@@ -36,6 +37,20 @@ struct Claims {
 struct UserAuth {
     username: String,
     password: String,
+}
+
+#[derive(Deserialize)]
+struct CreateRoomPayload {
+    name: String,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct Room {
+    id: uuid::Uuid,
+    name: String,
+    status: String,
+    created_by: uuid::Uuid,
+    created_at: time::OffsetDateTime,
 }
 
 // --- JWT Claims Extractor ---
@@ -103,6 +118,7 @@ async fn main() {
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/me", get(get_me))
+        .route("/api/rooms", post(create_room))
         .layer(cors)
         .with_state(pool);
 
@@ -229,6 +245,43 @@ async fn logout() -> Result<impl IntoResponse, (StatusCode, String)> {
 
     let jar = CookieJar::new().add(cookie);
     Ok((StatusCode::OK, jar, "Logged out successfully"))
+}
+
+async fn create_room(
+    State(pool): State<PgPool>,
+    claims: Claims, // 認証済みユーザー情報
+    Json(payload): Json<CreateRoomPayload>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // まず、claims.sub (username) から user_id を取得する
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, username, password_hash FROM users WHERE username = $1",
+    )
+    .bind(&claims.sub)
+    .fetch_one(&pool)
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to find user".to_string(),
+        )
+    })?;
+
+    // rooms テーブルに新しいルームを挿入
+    let room = sqlx::query_as::<_, Room>(
+        "INSERT INTO rooms (name, created_by) VALUES ($1, $2) RETURNING *",
+    )
+    .bind(payload.name)
+    .bind(user.id) // 取得した user.id を使う
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create room: {}", e),
+        )
+    })?;
+
+    Ok((StatusCode::CREATED, Json(room)))
 }
 
 async fn get_me(claims: Claims) -> Json<Claims> {
