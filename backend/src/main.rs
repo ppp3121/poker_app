@@ -1,7 +1,7 @@
 use axum::http::{Method, header};
 use axum::{
     Json, Router,
-    extract::{FromRequestParts, State},
+    extract::{FromRequestParts, Path, State},
     http::{StatusCode, request::Parts},
     response::IntoResponse,
     routing::{get, post},
@@ -16,7 +16,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::net::SocketAddr;
 use time;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 // --- 構造体の定義 ---
 
@@ -119,6 +119,7 @@ async fn main() {
         .route("/api/logout", post(logout))
         .route("/api/me", get(get_me))
         .route("/api/rooms", post(create_room).get(get_rooms))
+        .route("/api/rooms/{id}", get(get_room_by_id))
         .layer(cors)
         .with_state(pool);
 
@@ -299,6 +300,28 @@ async fn get_rooms(
         })?;
 
     Ok(Json(rooms))
+}
+
+async fn get_room_by_id(
+    State(pool): State<PgPool>,
+    Path(room_id): Path<uuid::Uuid>, // ★ URLパスからroom_idを取得
+    _claims: Claims,                 // 認証が必要
+) -> Result<Json<Room>, (StatusCode, String)> {
+    let room = sqlx::query_as::<_, Room>("SELECT * FROM rooms WHERE id = $1")
+        .bind(room_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to fetch room: {}", e),
+            )
+        })?;
+
+    match room {
+        Some(room) => Ok(Json(room)),
+        None => Err((StatusCode::NOT_FOUND, "Room not found".to_string())),
+    }
 }
 
 async fn get_me(claims: Claims) -> Json<Claims> {
