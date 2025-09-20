@@ -118,7 +118,7 @@ async fn main() {
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/me", get(get_me))
-        .route("/api/rooms", post(create_room))
+        .route("/api/rooms", post(create_room).get(get_rooms))
         .layer(cors)
         .with_state(pool);
 
@@ -282,6 +282,23 @@ async fn create_room(
     })?;
 
     Ok((StatusCode::CREATED, Json(room)))
+}
+
+async fn get_rooms(
+    State(pool): State<PgPool>,
+    _claims: Claims, // ログインしているユーザーのみアクセス可能にするため
+) -> Result<Json<Vec<Room>>, (StatusCode, String)> {
+    let rooms = sqlx::query_as::<_, Room>("SELECT * FROM rooms ORDER BY created_at DESC")
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to fetch rooms: {}", e),
+            )
+        })?;
+
+    Ok(Json(rooms))
 }
 
 async fn get_me(claims: Claims) -> Json<Claims> {
