@@ -13,6 +13,10 @@ export default function LobbyPage() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
+  const handleJoinRoom = (roomId: string) => {
+    router.push(`/rooms/${roomId}`);
+  };
+
   useEffect(() => {
     if (isInitialized && !isLoggedIn) {
       router.push('/login');
@@ -63,7 +67,7 @@ export default function LobbyPage() {
               {rooms.map((room) => (
                 <li key={room.id} style={{ border: '1px solid #555', padding: '1rem', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between' }}>
                   <span>{room.name}</span>
-                  <button style={{ padding: '0.5rem 1rem' }}>参加する</button>
+                  <button onClick={() => handleJoinRoom(room.id)} style={{ padding: '0.5rem 1rem' }}>参加する</button>
                 </li>
               ))}
             </ul>
