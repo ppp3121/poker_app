@@ -1,21 +1,28 @@
 use axum::http::{Method, header};
 use axum::{
     Json, Router,
-    extract::{FromRequestParts, Path, State},
+    extract::{
+        FromRequestParts, Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{StatusCode, request::Parts},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::{Duration, Utc};
+use dashmap::DashMap;
 use dotenvy::dotenv;
+use futures_util::{SinkExt, stream::StreamExt};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use time;
+use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
 // --- 構造体の定義 ---
@@ -51,6 +58,13 @@ struct Room {
     status: String,
     created_by: uuid::Uuid,
     created_at: time::OffsetDateTime,
+}
+
+// WebSocket接続を管理するための状態
+#[derive(Clone)]
+struct AppState {
+    db_pool: PgPool,
+    rooms: Arc<DashMap<uuid::Uuid, broadcast::Sender<String>>>,
 }
 
 // --- JWT Claims Extractor ---
@@ -100,6 +114,12 @@ async fn main() {
 
     println!("Database connected successfully.");
 
+    // AppStateを初期化
+    let app_state = Arc::new(AppState {
+        db_pool: pool.clone(),
+        rooms: Arc::new(DashMap::new()), // DashMapを初期化
+    });
+
     // CORSの設定
     let cors = CorsLayer::new()
         .allow_origin(
@@ -120,8 +140,9 @@ async fn main() {
         .route("/api/me", get(get_me))
         .route("/api/rooms", post(create_room).get(get_rooms))
         .route("/api/rooms/{id}", get(get_room_by_id))
+        .route("/api/ws/rooms/{room_id}", get(ws_handler))
         .layer(cors)
-        .with_state(pool);
+        .with_state(app_state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8000));
     println!("listening on {}", addr);
@@ -132,8 +153,78 @@ async fn main() {
 
 // --- API ハンドラ ---
 
+// WebSocketハンドラ関数
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    Path(room_id): Path<uuid::Uuid>,
+    claims: Claims, // ユーザー情報を取得
+) -> Response {
+    ws.on_upgrade(move |socket| handle_socket(socket, state, claims, room_id))
+}
+
+// 実際のWebSocket通信を処理する関数
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    claims: Claims,
+    room_id: uuid::Uuid,
+) {
+    // or_insert_withを使用して、存在しない場合のみ新しいchannelを作成する
+    let tx = state
+        .rooms
+        .entry(room_id)
+        .or_insert_with(|| broadcast::channel(100).0)
+        .clone();
+
+    // このルーム専用のSenderを取得または新規作成する
+    let mut rx = tx.subscribe();
+    let (mut sender, mut receiver) = socket.split();
+    let username = claims.sub;
+
+    // 参加メッセージをこのルームにだけブロードキャスト
+    let join_msg = format!("{}さんが入室しました。", username);
+    let _ = tx.send(join_msg);
+
+    let username_clone = username.clone();
+    let tx_clone = tx.clone();
+
+    // このクライアントからのメッセージを待ち受けるタスク
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(Message::Text(text))) = receiver.next().await {
+            let _ = tx_clone.send(format!("{}: {}", username_clone, text));
+        }
+    });
+
+    // 他のクライアントからのメッセージをこのクライアントに送信するタスク
+    let mut send_task = tokio::spawn(async move {
+        while let Ok(msg) = rx.recv().await {
+            if sender.send(Message::Text(msg.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // どちらかのタスクが終了したら、もう片方も終了させる
+    tokio::select! {
+        _ = (&mut recv_task) => send_task.abort(),
+        _ = (&mut send_task) => recv_task.abort(),
+    };
+
+    // 退出メッセージをブロードキャスト (元の変数はここでまだ有効)
+    let leave_msg = format!("{}さんが退出しました。", username);
+    let _ = tx.send(leave_msg);
+
+    // ★ もしルームに誰もいなくなったら、DashMapからSenderを削除する（メモリ解放）
+    if tx.receiver_count() == 1 {
+        state.rooms.remove(&room_id);
+        println!("Room {} is now empty and removed.", room_id);
+    }
+}
+
+//registerハンドラ
 async fn register(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<UserAuth>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     println!("Registering user: {}", payload.username);
@@ -151,7 +242,7 @@ async fn register(
         payload.username,
         password_hash
     )
-    .execute(&pool)
+    .execute(&state.db_pool)
     .await
     {
         Ok(_) => Ok(StatusCode::CREATED),
@@ -170,13 +261,14 @@ async fn register(
     }
 }
 
+// loginハンドラ
 async fn login(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<UserAuth>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
         .bind(&payload.username)
-        .fetch_optional(&pool)
+        .fetch_optional(&state.db_pool)
         .await
     {
         Ok(Some(user)) => user,
@@ -231,6 +323,7 @@ async fn login(
     }
 }
 
+// logoutハンドラ
 async fn logout() -> Result<impl IntoResponse, (StatusCode, String)> {
     // Cookieを即座に無効にするために、過去の時間を設定
     let past_time = time::OffsetDateTime::UNIX_EPOCH;
@@ -248,8 +341,9 @@ async fn logout() -> Result<impl IntoResponse, (StatusCode, String)> {
     Ok((StatusCode::OK, jar, "Logged out successfully"))
 }
 
+// create_roomハンドラ
 async fn create_room(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     claims: Claims, // 認証済みユーザー情報
     Json(payload): Json<CreateRoomPayload>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -258,7 +352,7 @@ async fn create_room(
         "SELECT id, username, password_hash FROM users WHERE username = $1",
     )
     .bind(&claims.sub)
-    .fetch_one(&pool)
+    .fetch_one(&state.db_pool)
     .await
     .map_err(|_| {
         (
@@ -273,7 +367,7 @@ async fn create_room(
     )
     .bind(payload.name)
     .bind(user.id) // 取得した user.id を使う
-    .fetch_one(&pool)
+    .fetch_one(&state.db_pool)
     .await
     .map_err(|e| {
         (
@@ -285,12 +379,13 @@ async fn create_room(
     Ok((StatusCode::CREATED, Json(room)))
 }
 
+// get_roomsハンドラ
 async fn get_rooms(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     _claims: Claims, // ログインしているユーザーのみアクセス可能にするため
 ) -> Result<Json<Vec<Room>>, (StatusCode, String)> {
     let rooms = sqlx::query_as::<_, Room>("SELECT * FROM rooms ORDER BY created_at DESC")
-        .fetch_all(&pool)
+        .fetch_all(&state.db_pool)
         .await
         .map_err(|e| {
             (
@@ -302,14 +397,15 @@ async fn get_rooms(
     Ok(Json(rooms))
 }
 
+// get_room_by_idハンドラ
 async fn get_room_by_id(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     Path(room_id): Path<uuid::Uuid>, // ★ URLパスからroom_idを取得
     _claims: Claims,                 // 認証が必要
 ) -> Result<Json<Room>, (StatusCode, String)> {
     let room = sqlx::query_as::<_, Room>("SELECT * FROM rooms WHERE id = $1")
         .bind(room_id)
-        .fetch_optional(&pool)
+        .fetch_optional(&state.db_pool)
         .await
         .map_err(|e| {
             (
@@ -324,6 +420,7 @@ async fn get_room_by_id(
     }
 }
 
+// get_meハンドラ
 async fn get_me(claims: Claims) -> Json<Claims> {
     Json(claims)
 }
