@@ -2,7 +2,7 @@ use axum::http::{Method, header};
 use axum::{
     Json, Router,
     extract::{
-        FromRequestParts, Path, State,
+        FromRequestParts, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{StatusCode, request::Parts},
@@ -67,6 +67,12 @@ struct AppState {
     rooms: Arc<DashMap<uuid::Uuid, broadcast::Sender<String>>>,
 }
 
+// WebSocket認証用のクエリパラメータ
+#[derive(Deserialize)]
+struct WebSocketAuth {
+    token: Option<String>,
+}
+
 // --- JWT Claims Extractor ---
 
 impl<S> FromRequestParts<S> for Claims
@@ -100,6 +106,16 @@ where
     }
 }
 
+// JWT検証のヘルパー関数
+fn verify_jwt(token: &str) -> Result<Claims, String> {
+    let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+    let decoding_key = DecodingKey::from_secret(secret.as_ref());
+
+    decode::<Claims>(token, &decoding_key, &Validation::default())
+        .map(|data| data.claims)
+        .map_err(|err| format!("Invalid token: {}", err))
+}
+
 // --- メイン関数 ---
 
 #[tokio::main]
@@ -117,7 +133,7 @@ async fn main() {
     // AppStateを初期化
     let app_state = Arc::new(AppState {
         db_pool: pool.clone(),
-        rooms: Arc::new(DashMap::new()), // DashMapを初期化
+        rooms: Arc::new(DashMap::new()),
     });
 
     // CORSの設定
@@ -127,9 +143,19 @@ async fn main() {
                 .parse::<axum::http::HeaderValue>()
                 .unwrap(),
         )
-        .allow_credentials(true) // Cookieをやり取りするために必要
-        .allow_methods(vec![Method::GET, Method::POST])
-        .allow_headers(vec![header::CONTENT_TYPE]);
+        .allow_credentials(true)
+        .allow_methods(vec![Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(vec![
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            header::COOKIE,
+            header::SET_COOKIE,
+            header::UPGRADE,
+            header::CONNECTION,
+            header::SEC_WEBSOCKET_KEY,
+            header::SEC_WEBSOCKET_VERSION,
+            header::SEC_WEBSOCKET_PROTOCOL,
+        ]);
 
     // ルーターの設定
     let app = Router::new()
@@ -158,8 +184,29 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<uuid::Uuid>,
-    claims: Claims, // ユーザー情報を取得
+    Query(auth): Query<WebSocketAuth>,
+    jar: CookieJar,
 ) -> Response {
+    // まずCookieからトークンを取得を試す
+    let token = if let Some(query_token) = auth.token {
+        query_token
+    } else if let Some(cookie) = jar.get("token") {
+        cookie.value().to_string()
+    } else {
+        println!("WebSocket connection failed: No token found");
+        return (StatusCode::UNAUTHORIZED, "Missing token").into_response();
+    };
+
+    // JWTを検証
+    let claims = match verify_jwt(&token) {
+        Ok(claims) => claims,
+        Err(err) => {
+            println!("WebSocket connection failed: {}", err);
+            return (StatusCode::UNAUTHORIZED, err).into_response();
+        }
+    };
+
+    println!("WebSocket connection established for user: {}", claims.sub);
     ws.on_upgrade(move |socket| handle_socket(socket, state, claims, room_id))
 }
 
@@ -182,26 +229,26 @@ async fn handle_socket(
     let (mut sender, mut receiver) = socket.split();
     let username = claims.sub;
 
-    // 参加メッセージをこのルームにだけブロードキャスト
-    let join_msg = format!("{}さんが入室しました。", username);
-    let _ = tx.send(join_msg);
-
-    let username_clone = username.clone();
-    let tx_clone = tx.clone();
-
-    // このクライアントからのメッセージを待ち受けるタスク
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(Message::Text(text))) = receiver.next().await {
-            let _ = tx_clone.send(format!("{}: {}", username_clone, text));
-        }
-    });
-
-    // 他のクライアントからのメッセージをこのクライアントに送信するタスク
+    // このクライアントへメッセージを送信するためのタスクを生成
     let mut send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
             if sender.send(Message::Text(msg.into())).await.is_err() {
                 break;
             }
+        }
+    });
+
+    // このクライアントからのメッセージを受信するためのタスクを生成
+    let tx_clone = tx.clone();
+    let username_clone = username.clone();
+    let mut recv_task = tokio::spawn(async move {
+        // まず参加メッセージを送信
+        let join_msg = format!("{}さんが入室しました。", username_clone);
+        let _ = tx_clone.send(join_msg);
+
+        // クライアントからのメッセージを待ち続ける
+        while let Some(Ok(Message::Text(text))) = receiver.next().await {
+            let _ = tx_clone.send(format!("{}: {}", username_clone, text));
         }
     });
 
