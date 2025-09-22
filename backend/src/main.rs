@@ -1,3 +1,4 @@
+use crate::game::{GameMessage, GameState, PlayerAction};
 use axum::http::{Method, header};
 use axum::{
     Json, Router,
@@ -22,8 +23,11 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use time;
+use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
+
+mod game;
 
 // --- 構造体の定義 ---
 
@@ -64,7 +68,10 @@ struct Room {
 #[derive(Clone)]
 struct AppState {
     db_pool: PgPool,
-    rooms: Arc<DashMap<uuid::Uuid, broadcast::Sender<String>>>,
+    // チャットメッセージ用
+    chat_rooms: Arc<DashMap<uuid::Uuid, broadcast::Sender<String>>>,
+    // ゲーム状態管理用 (Mutexで保護)
+    game_states: Arc<DashMap<uuid::Uuid, Mutex<GameState>>>,
 }
 
 // WebSocket認証用のクエリパラメータ
@@ -133,7 +140,8 @@ async fn main() {
     // AppStateを初期化
     let app_state = Arc::new(AppState {
         db_pool: pool.clone(),
-        rooms: Arc::new(DashMap::new()),
+        chat_rooms: Arc::new(DashMap::new()),
+        game_states: Arc::new(DashMap::new()),
     });
 
     // CORSの設定
@@ -217,56 +225,86 @@ async fn handle_socket(
     claims: Claims,
     room_id: uuid::Uuid,
 ) {
-    // or_insert_withを使用して、存在しない場合のみ新しいchannelを作成する
-    let tx = state
-        .rooms
+    // チャット用のチャンネルを取得
+    let chat_tx = state
+        .chat_rooms
         .entry(room_id)
         .or_insert_with(|| broadcast::channel(100).0)
         .clone();
+    let mut chat_rx = chat_tx.subscribe();
 
-    // このルーム専用のSenderを取得または新規作成する
-    let mut rx = tx.subscribe();
+    // ゲーム状態を取得または新規作成
+    let game_state_lock = state
+        .game_states
+        .entry(room_id)
+        .or_insert_with(|| Mutex::new(GameState::new()))
+        .value()
+        .clone();
+
     let (mut sender, mut receiver) = socket.split();
     let username = claims.sub;
 
-    // このクライアントへメッセージを送信するためのタスクを生成
-    let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg.into())).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // このクライアントからのメッセージを受信するためのタスクを生成
-    let tx_clone = tx.clone();
-    let username_clone = username.clone();
-    let mut recv_task = tokio::spawn(async move {
-        // まず参加メッセージを送信
-        let join_msg = format!("{}さんが入室しました。", username_clone);
-        let _ = tx_clone.send(join_msg);
-
-        // クライアントからのメッセージを待ち続ける
-        while let Some(Ok(Message::Text(text))) = receiver.next().await {
-            let _ = tx_clone.send(format!("{}: {}", username_clone, text));
-        }
-    });
-
-    // どちらかのタスクが終了したら、もう片方も終了させる
-    tokio::select! {
-        _ = (&mut recv_task) => send_task.abort(),
-        _ = (&mut send_task) => recv_task.abort(),
-    };
-
-    // 退出メッセージをブロードキャスト (元の変数はここでまだ有効)
-    let leave_msg = format!("{}さんが退出しました。", username);
-    let _ = tx.send(leave_msg);
-
-    // ★ もしルームに誰もいなくなったら、DashMapからSenderを削除する（メモリ解放）
-    if tx.receiver_count() == 1 {
-        state.rooms.remove(&room_id);
-        println!("Room {} is now empty and removed.", room_id);
+    // --- 接続時の処理 ---
+    // プレイヤーをゲーム状態に追加
+    {
+        let mut game = game_state_lock.lock().await;
+        game.add_player(username.clone());
     }
+
+    // チャットに参加メッセージを送信
+    let _ = chat_tx.send(format!("{}さんが入室しました。", username));
+
+    // --- メインの送受信ループ ---
+    loop {
+        tokio::select! {
+            // 他のクライアントからのチャットメッセージを受信して、このクライアントに送信
+            Ok(msg) = chat_rx.recv() => {
+                let event = GameMessage::ChatMessage(msg);
+                let json = serde_json::to_string(&event).unwrap();
+                if sender.send(Message::Text(json)).await.is_err() {
+                    break; // 送信に失敗したらループを抜ける
+                }
+            },
+            // このクライアントからのメッセージを受信
+            Some(Ok(msg)) = receiver.next() => {
+                if let Message::Text(text) = msg {
+                    // 受け取ったJSONをGameMessageにパース
+                    match serde_json::from_str::<GameMessage>(&text) {
+                        Ok(GameMessage::PlayerAction(action)) => {
+                            // ゲーム状態をロックしてアクションを処理
+                            let mut game = game_state_lock.lock().await;
+                            match action {
+                                PlayerAction::StartGame => {
+                                    game.start_game();
+                                    // TODO: 個別に手札を送信する処理
+                                }
+                                // TODO: 他のアクションも処理
+                                _ => {}
+                            }
+                            // ★全員に最新のゲーム状態をブロードキャスト
+                            let update_msg = GameMessage::GameStateUpdate(game.clone());
+                            let json = serde_json::to_string(&update_msg).unwrap();
+                            let _ = chat_tx.send(json);
+                        }
+                        Ok(GameMessage::ChatMessage(chat_msg)) => {
+                            // チャットメッセージをブロードキャスト
+                            let _ = chat_tx.send(format!("{}: {}", username, chat_msg));
+                        }
+                        _ => {
+                            // 不正なメッセージ
+                            println!("Received invalid message format");
+                        }
+                    }
+                } else if let Message::Close(_) = msg {
+                    break;
+                }
+            },
+        }
+    }
+
+    // --- 切断時の処理 ---
+    let _ = chat_tx.send(format!("{}さんが退出しました。", username));
+    // TODO: プレイヤーをGameStateから削除する処理
 }
 
 //registerハンドラ
