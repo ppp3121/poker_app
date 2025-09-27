@@ -71,7 +71,7 @@ struct AppState {
     // チャットメッセージ用
     chat_rooms: Arc<DashMap<uuid::Uuid, broadcast::Sender<String>>>,
     // ゲーム状態管理用 (Mutexで保護)
-    game_states: Arc<DashMap<uuid::Uuid, Mutex<GameState>>>,
+    game_states: Arc<DashMap<uuid::Uuid, Arc<Mutex<GameState>>>>,
 }
 
 // WebSocket認証用のクエリパラメータ
@@ -237,7 +237,7 @@ async fn handle_socket(
     let game_state_lock = state
         .game_states
         .entry(room_id)
-        .or_insert_with(|| Mutex::new(GameState::new()))
+        .or_insert_with(|| Arc::new(Mutex::new(GameState::new())))
         .value()
         .clone();
 
@@ -259,9 +259,7 @@ async fn handle_socket(
         tokio::select! {
             // 他のクライアントからのチャットメッセージを受信して、このクライアントに送信
             Ok(msg) = chat_rx.recv() => {
-                let event = GameMessage::ChatMessage(msg);
-                let json = serde_json::to_string(&event).unwrap();
-                if sender.send(Message::Text(json)).await.is_err() {
+                if sender.send(Message::Text(msg.into())).await.is_err() {
                     break; // 送信に失敗したらループを抜ける
                 }
             },
