@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import { useUserStore } from '@/store/userStore';
-import { Room } from '@/types';
+import { Room, GameState, GameMessage } from '@/types';
 import { useRouter } from 'next/navigation';
 
 export default function RoomPage() {
@@ -16,11 +16,15 @@ export default function RoomPage() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [gameState, setGameState] = useState<GameState | null>(null);
+  const [myHand, setMyHand] = useState<string[]>([]);
+
   // WebSocketメッセージを管理するためのState
-  const [messages, setMessages] = useState<string[]>([]);
+  const [chatMessages, setChatMessages] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState<string>('');
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<string>('接続中...');
+  const reconnectAttempt = useRef(0);
 
   useEffect(() => {
     // 認証状態のチェック
@@ -57,73 +61,88 @@ export default function RoomPage() {
     }
   }, [isInitialized, isLoggedIn, router, roomId]);
 
-  // WebSocket接続用のuseEffect（修正版）
+  // WebSocket接続用のuseEffect
   useEffect(() => {
-    if (!isInitialized || !isLoggedIn || !roomId) {
-      return;
-    }
+    if (!isInitialized || !isLoggedIn || !roomId) return;
 
     const connectWebSocket = () => {
-      console.log('WebSocket接続を開始します...');
       setConnectionStatus('接続中...');
-
-      // まずCookieでの接続を試す
       const socket = new WebSocket(`ws://localhost:8000/api/ws/rooms/${roomId}`);
 
       socket.onopen = () => {
-        console.log('WebSocket connected successfully');
         setConnectionStatus('接続済み');
         setWs(socket);
-        setError(null); // エラーをクリア
+        reconnectAttempt.current = 0;
       };
 
       socket.onmessage = (event) => {
-        console.log('Received message:', event.data);
-        setMessages((prevMessages) => [...prevMessages, event.data]);
-      };
-
-      socket.onclose = (event) => {
-        console.log('WebSocket disconnected', event.code, event.reason);
-        setConnectionStatus('切断');
-        setWs(null);
-
-        // 異常な切断の場合は再接続を試す
-        if (event.code !== 1000 && event.code !== 1001) {
-          console.log('再接続を試みます...');
-          setTimeout(connectWebSocket, 3000);
+        // サーバーからのメッセージを正しく処理する
+        try {
+          const message: GameMessage = JSON.parse(event.data);
+          switch (message.type) {
+            case 'ChatMessage':
+              setChatMessages((prev) => [...prev, message.payload]);
+              break;
+            case 'GameStateUpdate':
+              setGameState(message.payload);
+              break;
+            case 'DealHand':
+              setMyHand(message.payload.cards);
+              break;
+          }
+        } catch (e) {
+          setChatMessages((prev) => [...prev, event.data]);
         }
       };
 
-      socket.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setConnectionStatus('エラー');
-        setError('リアルタイム接続に失敗しました。ページを再読み込みしてみてください。');
+      socket.onclose = () => {
+        setConnectionStatus('切断');
+        if (reconnectAttempt.current < 5) {
+          reconnectAttempt.current++;
+          setTimeout(connectWebSocket, 3000);
+        } else {
+          setError('サーバーとの接続が切れました。ページを更新してください。');
+        }
       };
 
-      return socket;
+      socket.onerror = (err) => {
+        console.error('WebSocket error:', err);
+        setConnectionStatus('エラー');
+      };
     };
 
-    const socket = connectWebSocket();
+    connectWebSocket();
 
-    // コンポーネントがアンマウントされるときに接続を閉じる
     return () => {
-      if (socket) {
-        console.log('WebSocket接続を閉じます');
-        socket.close(1000, 'Component unmounting');
-      }
+      reconnectAttempt.current = 5;
+      ws?.close();
     };
   }, [isInitialized, isLoggedIn, roomId]);
 
-  const handleSendMessage = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (ws && ws.readyState === WebSocket.OPEN && chatInput.trim()) {
-      console.log('Sending message:', chatInput);
-      ws.send(chatInput);
-      setChatInput('');
-    } else {
-      console.log('WebSocket not ready or message empty');
+  // 「ゲーム開始」ボタンの処理
+  const handleStartGame = () => {
+    if (ws?.readyState === WebSocket.OPEN) {
+      const message = {
+        type: 'PlayerAction',
+        payload: { action: 'StartGame' },
+      };
+      ws.send(JSON.stringify(message));
     }
   };
+
+  // チャット送信をJSON形式に修正
+  const handleSendMessage = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (ws?.readyState === WebSocket.OPEN && chatInput.trim()) {
+      const message = {
+        type: 'ChatMessage',
+        payload: chatInput,
+      };
+      ws.send(JSON.stringify(message));
+      setChatInput('');
+    }
+  };
+
 
   if (isLoading || !isInitialized) {
     return <div>読み込み中...</div>;
@@ -139,98 +158,55 @@ export default function RoomPage() {
 
   return (
     <main style={{ display: 'flex', height: 'calc(100vh - 73px)' }}>
-      <div style={{ flex: 1, padding: '2rem' }}>
-        <h1>{room.name}</h1>
-        <p>ルームID: {room.id}</p>
-        <p>ステータス: {room.status}</p>
+      <div style={{ flex: 1, padding: '2rem', overflowY: 'auto' }}>
+        <h1>{room?.name}</h1>
+        <p>ルームID: {room?.id}</p>
+        <hr style={{ margin: '1rem 0' }} />
 
-        {/* WebSocket接続状態を表示 */}
-        <p style={{
-          color: connectionStatus === '接続済み' ? 'green' :
-            connectionStatus === 'エラー' ? 'red' : 'orange'
-        }}>
-          接続状態: {connectionStatus}
-        </p>
-
-        {error && (
-          <div style={{
-            color: 'red',
-            backgroundColor: '#ffebee',
-            padding: '1rem',
-            borderRadius: '4px',
-            marginBottom: '1rem'
-          }}>
-            {error}
-          </div>
+        {gameState?.status === 'Waiting' && (
+          <button onClick={handleStartGame} style={{ padding: '0.5rem 1rem', marginBottom: '1rem' }}>
+            ゲーム開始
+          </button>
         )}
 
-        {/* ここに将来的にゲームコンポーネントが配置されます */}
-        <div style={{ marginTop: '2rem', border: '1px solid #ccc', padding: '1rem' }}>
-          <h2>ゲームテーブル</h2>
-          <p>（ここにポーカーのテーブルが表示されます）</p>
+        <div style={{ marginTop: '1rem', border: '1px solid #ccc', padding: '1rem' }}>
+          <h2>ゲームテーブル (Status: {gameState?.status})</h2>
+          <div><strong>Community Cards:</strong> {gameState?.community_cards.join(', ')}</div>
+          <div><strong>Pot:</strong> {gameState?.pot}</div>
+          <div style={{ fontSize: '1.2rem', fontWeight: 'bold', margin: '1rem 0', color: 'lightblue' }}>
+            My Hand: {myHand.join(', ')}
+          </div>
+          <hr />
+          <h3>Players:</h3>
+          <ul>
+            {gameState?.players.map(p => (
+              <li key={p.username}>
+                {p.username} (Stack: {p.stack})
+                {p.username === username && ' (You)'}
+              </li>
+            ))}
+          </ul>
         </div>
       </div>
 
-      {/* チャットとメッセージ表示エリア */}
-      <div style={{
-        width: '350px',
-        borderLeft: '1px solid #555',
-        padding: '2rem',
-        display: 'flex',
-        flexDirection: 'column'
-      }}>
+      <div style={{ width: '350px', borderLeft: '1px solid #555', padding: '2rem', display: 'flex', flexDirection: 'column' }}>
         <h2>チャット</h2>
-        <div style={{
-          flex: 1,
-          overflowY: 'auto',
-          border: '1px solid #555',
-          padding: '0.5rem',
-          marginBottom: '1rem',
-          minHeight: '300px',
-          maxHeight: '400px'
-        }}>
-          {messages.length === 0 ? (
-            <p style={{ color: '#666', fontStyle: 'italic' }}>
-              まだメッセージがありません
-            </p>
-          ) : (
-            messages.map((msg, index) => (
-              <p key={index} style={{ marginBottom: '0.5rem', wordBreak: 'break-word' }}>
-                {msg}
-              </p>
-            ))
-          )}
+        <p>接続状態: {connectionStatus}</p>
+        <div style={{ flex: 1, overflowY: 'auto', border: '1px solid #555', padding: '0.5rem', margin: '0.5rem 0' }}>
+          {[...chatMessages].reverse().map((msg, index) => (
+            <p key={index}>{msg}</p>
+          ))}
         </div>
         <form onSubmit={handleSendMessage}>
           <input
             type="text"
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              color: 'black',
-              boxSizing: 'border-box',
-              border: '1px solid #ccc',
-              borderRadius: '4px'
-            }}
+            style={{ width: '100%', padding: '0.5rem', color: 'black' }}
             placeholder="メッセージを入力..."
-            disabled={!ws || ws.readyState !== WebSocket.OPEN}
+            disabled={ws?.readyState !== WebSocket.OPEN}
           />
-          <button
-            type="submit"
-            style={{
-              width: '100%',
-              marginTop: '0.5rem',
-              padding: '0.5rem',
-              backgroundColor: (ws && ws.readyState === WebSocket.OPEN) ? '#007bff' : '#ccc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: (ws && ws.readyState === WebSocket.OPEN) ? 'pointer' : 'not-allowed'
-            }}
-            disabled={!ws || ws.readyState !== WebSocket.OPEN}
-          >
+          <button type="submit" style={{ width: '100%', marginTop: '0.5rem' }} disabled={ws?.readyState !== WebSocket.OPEN}>
             送信
           </button>
         </form>

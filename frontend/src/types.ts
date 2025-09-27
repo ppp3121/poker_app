@@ -5,3 +5,26 @@ export interface Room {
   created_by: string;
   created_at: string;
 }
+
+// プレイヤーの状態
+export interface Player {
+  username: string;
+  stack: number;
+  hand: string[];
+  is_active: boolean;
+}
+
+// ゲーム全体の状態
+export interface GameState {
+  players: Player[];
+  community_cards: string[];
+  pot: number;
+  current_turn_username: string | null;
+  status: string;
+}
+
+// WebSocketで送受信するメッセージの型
+export type GameMessage =
+  | { type: 'ChatMessage'; payload: string }
+  | { type: 'GameStateUpdate'; payload: GameState }
+  | { type: 'DealHand'; payload: { cards: string[] } };
