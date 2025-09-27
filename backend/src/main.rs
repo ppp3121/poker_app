@@ -249,6 +249,13 @@ async fn handle_socket(
     {
         let mut game = game_state_lock.lock().await;
         game.add_player(username.clone());
+
+        let initial_state_msg = GameMessage::GameStateUpdate(game.clone());
+        let json = serde_json::to_string(&initial_state_msg).unwrap();
+
+        if sender.send(Message::Text(json.into())).await.is_err() {
+            return;
+        }
     }
 
     // チャットに参加メッセージを送信
