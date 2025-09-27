@@ -274,15 +274,33 @@ async fn handle_socket(
                             match action {
                                 PlayerAction::StartGame => {
                                     game.start_game();
-                                    // TODO: 個別に手札を送信する処理
+
+                                    // まず、手札を隠した全体向けの状態を作成
+                                    let sanitized_state = game.sanitized();
+                                    let update_msg = GameMessage::GameStateUpdate(sanitized_state);
+                                    let update_json = serde_json::to_string(&update_msg).unwrap();
+
+                                    // 自分（StartGameを押した本人）の手札を探す
+                                    if let Some(my_player) = game.players.iter().find(|p| p.username == username) {
+                                        // 自分にだけ手札情報を送信
+                                        let hand_msg = GameMessage::DealHand(game::DealHandPayload {
+                                            cards: my_player.hand.clone(),
+                                        });
+                                        let hand_json = serde_json::to_string(&hand_msg).unwrap();
+
+                                        // ★注意: この実装ではStartGameを押した本人にしか手札が送られません。
+                                        // 本格的な実装には、各プレイヤーの通信チャネルを管理する
+                                        // さらなるリファクタリングが必要になります。今回はまず一歩進めます。
+                                        if sender.send(Message::Text(hand_json.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+
+                                    // 全員に手札が隠されたゲーム状態をブロードキャスト
+                                    let _ = chat_tx.send(update_json);
                                 }
-                                // TODO: 他のアクションも処理
                                 _ => {}
                             }
-                            // ★全員に最新のゲーム状態をブロードキャスト
-                            let update_msg = GameMessage::GameStateUpdate(game.clone());
-                            let json = serde_json::to_string(&update_msg).unwrap();
-                            let _ = chat_tx.send(json);
                         }
                         Ok(GameMessage::ChatMessage(chat_msg)) => {
                             // チャットメッセージをブロードキャスト

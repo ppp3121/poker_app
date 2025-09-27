@@ -93,6 +93,16 @@ impl GameState {
         // TODO: ブラインドの処理、最初のターンのプレイヤー決定などを追加
         self.current_turn_username = self.players.get(0).map(|p| p.username.clone());
     }
+
+    // 他のプレイヤーに手札情報が見えないようにサニタイズ（無害化）したGameStateを返す
+    pub fn sanitized(&self) -> Self {
+        let mut sanitized_state = self.clone();
+        for player in &mut sanitized_state.players {
+            // 手札を空のVecで上書きする
+            player.hand = Vec::new();
+        }
+        sanitized_state
+    }
 }
 
 // 52枚のカードデッキを作成するヘルパー関数
