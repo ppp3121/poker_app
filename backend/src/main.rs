@@ -23,8 +23,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use time;
-use tokio::sync::Mutex;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tower_http::cors::CorsLayer;
 
 mod game;
@@ -72,6 +71,7 @@ struct AppState {
     chat_rooms: Arc<DashMap<uuid::Uuid, broadcast::Sender<String>>>,
     // ゲーム状態管理用 (Mutexで保護)
     game_states: Arc<DashMap<uuid::Uuid, Arc<Mutex<GameState>>>>,
+    player_senders: Arc<DashMap<String, mpsc::Sender<String>>>,
 }
 
 // WebSocket認証用のクエリパラメータ
@@ -142,6 +142,7 @@ async fn main() {
         db_pool: pool.clone(),
         chat_rooms: Arc::new(DashMap::new()),
         game_states: Arc::new(DashMap::new()),
+        player_senders: Arc::new(DashMap::new()),
     });
 
     // CORSの設定
@@ -225,15 +226,24 @@ async fn handle_socket(
     claims: Claims,
     room_id: uuid::Uuid,
 ) {
-    // チャット用のチャンネルを取得
-    let chat_tx = state
+    let username = claims.sub;
+
+    // --- 接続セットアップ ---
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // 1. このクライアント専用のメッセージチャネルを作成
+    let (private_tx, mut private_rx) = mpsc::channel::<String>(10);
+    state.player_senders.insert(username.clone(), private_tx);
+
+    // 2. 公開メッセージ用のブロードキャストチャネルを取得
+    let broadcast_tx = state
         .chat_rooms
         .entry(room_id)
         .or_insert_with(|| broadcast::channel(100).0)
         .clone();
-    let mut chat_rx = chat_tx.subscribe();
+    let mut broadcast_rx = broadcast_tx.subscribe();
 
-    // ゲーム状態を取得または新規作成
+    // 3. ゲーム状態のロックを取得
     let game_state_lock = state
         .game_states
         .entry(room_id)
@@ -241,93 +251,80 @@ async fn handle_socket(
         .value()
         .clone();
 
-    let (mut sender, mut receiver) = socket.split();
-    let username = claims.sub;
-
-    // --- 接続時の処理 ---
-    // プレイヤーをゲーム状態に追加
+    // --- 接続時の初期処理 ---
     {
         let mut game = game_state_lock.lock().await;
         game.add_player(username.clone());
 
-        let initial_state_msg = GameMessage::GameStateUpdate(game.clone());
-        let json = serde_json::to_string(&initial_state_msg).unwrap();
-
-        if sender.send(Message::Text(json.into())).await.is_err() {
-            return;
-        }
+        // 全員に更新されたゲーム状態をブロードキャスト
+        let update_msg = GameMessage::GameStateUpdate(game.sanitized());
+        let json = serde_json::to_string(&update_msg).unwrap();
+        let _ = broadcast_tx.send(json);
     }
+    let _ = broadcast_tx.send(format!("{}さんが入室しました。", username));
 
-    // チャットに参加メッセージを送信
-    let _ = chat_tx.send(format!("{}さんが入室しました。", username));
-
-    // --- メインの送受信ループ ---
+    // --- メインループ ---
     loop {
         tokio::select! {
-            // 他のクライアントからのチャットメッセージを受信して、このクライアントに送信
-            Ok(msg) = chat_rx.recv() => {
-                if sender.send(Message::Text(msg.into())).await.is_err() {
-                    break; // 送信に失敗したらループを抜ける
-                }
-            },
-            // このクライアントからのメッセージを受信
-            Some(Ok(msg)) = receiver.next() => {
+            // A. クライアントからメッセージを受信した場合
+            Some(Ok(msg)) = ws_receiver.next() => {
                 if let Message::Text(text) = msg {
-                    // 受け取ったJSONをGameMessageにパース
                     match serde_json::from_str::<GameMessage>(&text) {
                         Ok(GameMessage::PlayerAction(action)) => {
-                            // ゲーム状態をロックしてアクションを処理
                             let mut game = game_state_lock.lock().await;
-                            match action {
-                                PlayerAction::StartGame => {
-                                    game.start_game();
+                            if let PlayerAction::StartGame = action {
+                                game.start_game();
 
-                                    // まず、手札を隠した全体向けの状態を作成
-                                    let sanitized_state = game.sanitized();
-                                    let update_msg = GameMessage::GameStateUpdate(sanitized_state);
-                                    let update_json = serde_json::to_string(&update_msg).unwrap();
-
-                                    // 自分（StartGameを押した本人）の手札を探す
-                                    if let Some(my_player) = game.players.iter().find(|p| p.username == username) {
-                                        // 自分にだけ手札情報を送信
+                                // 全プレイヤーに個別に手札を送信
+                                for player in &game.players {
+                                    if let Some(sender) = state.player_senders.get(&player.username) {
                                         let hand_msg = GameMessage::DealHand(game::DealHandPayload {
-                                            cards: my_player.hand.clone(),
+                                            cards: player.hand.clone(),
                                         });
-                                        let hand_json = serde_json::to_string(&hand_msg).unwrap();
-
-                                        // ★注意: この実装ではStartGameを押した本人にしか手札が送られません。
-                                        // 本格的な実装には、各プレイヤーの通信チャネルを管理する
-                                        // さらなるリファクタリングが必要になります。今回はまず一歩進めます。
-                                        if sender.send(Message::Text(hand_json.into())).await.is_err() {
-                                            break;
-                                        }
+                                        let json = serde_json::to_string(&hand_msg).unwrap();
+                                        // mpscチャネル経由で送信
+                                        let _ = sender.send(json).await;
                                     }
-
-                                    // 全員に手札が隠されたゲーム状態をブロードキャスト
-                                    let _ = chat_tx.send(update_json);
                                 }
-                                _ => {}
+
+                                // 全員に手札が隠されたゲーム状態をブロードキャスト
+                                let update_msg = GameMessage::GameStateUpdate(game.sanitized());
+                                let json = serde_json::to_string(&update_msg).unwrap();
+                                let _ = broadcast_tx.send(json);
                             }
                         }
                         Ok(GameMessage::ChatMessage(chat_msg)) => {
-                            // チャットメッセージをブロードキャスト
-                            let _ = chat_tx.send(format!("{}: {}", username, chat_msg));
+                            let _ = broadcast_tx.send(format!("{}: {}", username, chat_msg));
                         }
-                        _ => {
-                            // 不正なメッセージ
-                            println!("Received invalid message format");
-                        }
+                        _ => {}
                     }
                 } else if let Message::Close(_) = msg {
                     break;
                 }
             },
+            // B. ブロードキャストメッセージを受信した場合
+            Ok(msg) = broadcast_rx.recv() => {
+                if ws_sender.send(Message::Text(msg.into())).await.is_err() {
+                    break;
+                }
+            },
+            // C. このクライアント専用のメッセージを受信した場合
+            Some(msg) = private_rx.recv() => {
+                if ws_sender.send(Message::Text(msg.into())).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 
     // --- 切断時の処理 ---
-    let _ = chat_tx.send(format!("{}さんが退出しました。", username));
-    // TODO: プレイヤーをGameStateから削除する処理
+    state.player_senders.remove(&username);
+    let _ = broadcast_tx.send(format!("{}さんが退出しました。", username));
+    if broadcast_tx.receiver_count() == 1 {
+        state.chat_rooms.remove(&room_id);
+        state.game_states.remove(&room_id);
+        println!("Room {} is now empty and removed.", room_id);
+    }
 }
 
 //registerハンドラ
