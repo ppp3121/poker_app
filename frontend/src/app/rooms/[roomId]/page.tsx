@@ -218,7 +218,7 @@ export default function RoomPage() {
           <h3>Players:</h3>
           <ul>
             {gameState?.players.map(p => {
-              let color = 'white';
+              let color = 'red';
               if (p.username === gameState.current_turn_username) {
                 color = 'lightgreen';
               } else if (!p.is_active && gameState.status !== 'Waiting') {
