@@ -209,17 +209,30 @@ export default function RoomPage() {
 
         <div style={{ marginTop: '1rem', border: '1px solid #ccc', padding: '1rem' }}>
           <h2>ゲームテーブル (Status: {gameState?.status})</h2>
-          {/* ... */}
+          <div><strong>Community Cards:</strong> {gameState?.community_cards.join(', ')}</div>
+          <div><strong>Pot:</strong> {gameState?.pot}</div>
+          <div style={{ fontSize: '1.2rem', fontWeight: 'bold', margin: '1rem 0', color: 'lightblue' }}>
+            My Hand: {myHand.join(', ')}
+          </div>
+          <hr />
           <h3>Players:</h3>
           <ul>
-            {gameState?.players.map(p => (
-              <li key={p.username} style={{ color: p.username === gameState.current_turn_username ? 'lightgreen' : 'white' }}>
-                {p.username} (Stack: {p.stack})
-                {!p.is_active && ' (Folded)'}
-                {p.username === username && ' (You)'}
-                {p.username === gameState.current_turn_username && ' (Turn)'}
-              </li>
-            ))}
+            {gameState?.players.map(p => {
+              let color = 'white';
+              if (p.username === gameState.current_turn_username) {
+                color = 'lightgreen';
+              } else if (!p.is_active && gameState.status !== 'Waiting') {
+                color = 'grey';
+              }
+              return (
+                <li key={p.username} style={{ color }}>
+                  {p.username} (Stack: {p.stack})
+                  {p.username === username && ' (You)'}
+                  {!p.is_active && gameState.status !== 'Waiting' && ' (Folded)'}
+                  {p.username === gameState.current_turn_username && ' (Turn)'}
+                </li>
+              );
+            })}
           </ul>
         </div>
       </div>
