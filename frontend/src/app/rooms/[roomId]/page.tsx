@@ -19,6 +19,8 @@ export default function RoomPage() {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [myHand, setMyHand] = useState<string[]>([]);
 
+  const [betAmount, setBetAmount] = useState<number>(10);
+
   // WebSocketメッセージを管理するためのState
   const [chatMessages, setChatMessages] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState<string>('');
@@ -143,6 +145,18 @@ export default function RoomPage() {
     }
   };
 
+  // プレイヤーのアクションを送信する関数
+  const handlePlayerAction = (action: any) => {
+    if (ws?.readyState === WebSocket.OPEN) {
+      const message = {
+        type: 'PlayerAction',
+        payload: action,
+      };
+      ws.send(JSON.stringify(message));
+    }
+  };
+
+
 
   if (isLoading || !isInitialized) {
     return <div>読み込み中...</div>;
@@ -169,20 +183,41 @@ export default function RoomPage() {
           </button>
         )}
 
+        {/* アクションボタンエリア */}
+        {gameState && gameState.current_turn_username === username && (
+          <div style={{ marginTop: '1rem', padding: '1rem', border: '2px solid lightgreen' }}>
+            <h2>Your Turn!</h2>
+            <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem' }}>
+              <button onClick={() => handlePlayerAction({ action: 'Fold' })} style={{ padding: '0.5rem 1rem' }}>
+                フォールド
+              </button>
+              <button onClick={() => handlePlayerAction({ action: 'Call' })} style={{ padding: '0.5rem 1rem' }}>
+                コール
+              </button>
+              <input
+                type="number"
+                value={betAmount}
+                onChange={(e) => setBetAmount(Number(e.target.value))}
+                style={{ width: '80px', color: 'black', padding: '0.5rem' }}
+              />
+              <button onClick={() => handlePlayerAction({ action: 'Bet', amount: betAmount })} style={{ padding: '0.5rem 1rem' }}>
+                ベット
+              </button>
+            </div>
+          </div>
+        )}
+
         <div style={{ marginTop: '1rem', border: '1px solid #ccc', padding: '1rem' }}>
           <h2>ゲームテーブル (Status: {gameState?.status})</h2>
-          <div><strong>Community Cards:</strong> {gameState?.community_cards.join(', ')}</div>
-          <div><strong>Pot:</strong> {gameState?.pot}</div>
-          <div style={{ fontSize: '1.2rem', fontWeight: 'bold', margin: '1rem 0', color: 'lightblue' }}>
-            My Hand: {myHand.join(', ')}
-          </div>
-          <hr />
+          {/* ... */}
           <h3>Players:</h3>
           <ul>
             {gameState?.players.map(p => (
-              <li key={p.username}>
+              <li key={p.username} style={{ color: p.username === gameState.current_turn_username ? 'lightgreen' : 'white' }}>
                 {p.username} (Stack: {p.stack})
+                {!p.is_active && ' (Folded)'}
                 {p.username === username && ' (You)'}
+                {p.username === gameState.current_turn_username && ' (Turn)'}
               </li>
             ))}
           </ul>
