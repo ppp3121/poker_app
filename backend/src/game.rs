@@ -1,6 +1,8 @@
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::collections::HashMap;
 
 // サーバーとクライアント間でやり取りされるメッセージの定義
 #[derive(Serialize, Deserialize, Debug)]
@@ -47,6 +49,7 @@ pub struct GameState {
     pub current_turn_username: Option<String>,
     pub status: String, // e.g., "Waiting", "Pre-flop", "Flop", "Turn", "River", "Showdown"
     pub current_bet: u32,
+    pub dealer_index: usize,
     #[serde(skip)] // デッキ情報はクライアントに送らない
     deck: Vec<String>,
 }
@@ -61,6 +64,7 @@ impl GameState {
             current_turn_username: None,
             status: "Waiting".to_string(),
             current_bet: 0,
+            dealer_index: 0,
             deck: Vec::new(),
         }
     }
@@ -84,6 +88,8 @@ impl GameState {
             return; // 待機中でなければ開始しない
         }
 
+        self.dealer_index = (self.dealer_index + 1) % self.players.len();
+
         self.deck = create_deck();
         self.deck.shuffle(&mut thread_rng());
 
@@ -94,11 +100,36 @@ impl GameState {
             player.current_bet = 0;
         }
 
+        // ★ ブラインドの処理
+        let small_blind_index = (self.dealer_index + 1) % self.players.len();
+        let big_blind_index = (self.dealer_index + 2) % self.players.len();
+
+        let sb_amount = 10;
+        let bb_amount = 20;
+
+        // スモールブラインド
+        let sb_player = &mut self.players[small_blind_index];
+        let sb_bet = std::cmp::min(sb_amount, sb_player.stack);
+        sb_player.stack -= sb_bet;
+        sb_player.current_bet = sb_bet;
+        self.pot += sb_bet;
+
+        // ビッグブラインド
+        let bb_player = &mut self.players[big_blind_index];
+        let bb_bet = std::cmp::min(bb_amount, bb_player.stack);
+        bb_player.stack -= bb_bet;
+        bb_player.current_bet = bb_bet;
+        self.pot += bb_bet;
+
+        self.current_bet = bb_amount;
         self.status = "Pre-flop".to_string();
-        self.community_cards.clear();
-        self.pot = 0;
-        self.current_bet = 0;
-        self.current_turn_username = self.players.get(0).map(|p| p.username.clone());
+
+        // BBの次の人からアクション開始
+        self.current_turn_username = Some(
+            self.players[(big_blind_index + 1) % self.players.len()]
+                .username
+                .clone(),
+        );
     }
 
     // プレイヤーのアクションを処理する
@@ -158,6 +189,86 @@ impl GameState {
         }
     }
 
+    fn proceed_to_next_stage(&mut self) {
+        // 次のラウンドの準備
+        self.current_bet = 0;
+        for p in &mut self.players {
+            if p.is_active {
+                p.current_bet = 0;
+            }
+        }
+        // ディーラーの次のアクティブなプレイヤーからターンを再開
+        self.current_turn_username = self
+            .players
+            .iter()
+            .cycle()
+            .skip(self.dealer_index + 1)
+            .find(|p| p.is_active)
+            .map(|p| p.username.clone());
+
+        match self.status.as_str() {
+            "Pre-flop" => {
+                self.status = "Flop".to_string();
+                self.community_cards.push(self.deck.pop().unwrap());
+                self.community_cards.push(self.deck.pop().unwrap());
+                self.community_cards.push(self.deck.pop().unwrap());
+            }
+            "Flop" => {
+                self.status = "Turn".to_string();
+                self.community_cards.push(self.deck.pop().unwrap());
+            }
+            "Turn" => {
+                self.status = "River".to_string();
+                self.community_cards.push(self.deck.pop().unwrap());
+            }
+            "River" => {
+                self.status = "Showdown".to_string();
+                self.determine_winner(); // 勝者判定
+            }
+            _ => {}
+        }
+    }
+
+    // 勝者を決定する（簡易的なハイカード判定）
+    fn determine_winner(&mut self) {
+        let active_players: Vec<_> = self.players.iter_mut().filter(|p| p.is_active).collect();
+
+        if active_players.is_empty() {
+            return;
+        }
+
+        // ここに本格的な役判定ロジックが入るが、今回は簡易的にハイカードで勝敗を決める
+        // カードの強さ: T=10, J=11, Q=12, K=13, A=14
+        let get_card_value = |card: &str| -> u32 {
+            match &card[0..1] {
+                "T" => 10,
+                "J" => 11,
+                "Q" => 12,
+                "K" => 13,
+                "A" => 14,
+                c => c.parse().unwrap_or(0),
+            }
+        };
+
+        let mut winner = active_players[0].username.clone();
+        let mut max_value = 0;
+
+        for player in self.players.iter().filter(|p| p.is_active) {
+            let hand_value = get_card_value(&player.hand[0]) + get_card_value(&player.hand[1]);
+            if hand_value > max_value {
+                max_value = hand_value;
+                winner = player.username.clone();
+            }
+        }
+
+        if let Some(winner_player) = self.players.iter_mut().find(|p| p.username == winner) {
+            winner_player.stack += self.pot;
+        }
+
+        self.status = "Waiting".to_string();
+        self.current_turn_username = None;
+    }
+
     // ベッティングラウンドが終了したか判定
     fn check_betting_round_over(&self) -> bool {
         // アクティブなプレイヤー全員が同じ額をベットしていればラウンド終了
@@ -165,43 +276,6 @@ impl GameState {
             .iter()
             .filter(|p| p.is_active)
             .all(|p| p.current_bet == self.current_bet)
-    }
-
-    // ゲームを次のステージへ進める
-    fn proceed_to_next_stage(&mut self) {
-        match self.status.as_str() {
-            "Pre-flop" => {
-                self.status = "Flop".to_string();
-                // フロップの3枚をディール
-                self.community_cards.push(self.deck.pop().unwrap());
-                self.community_cards.push(self.deck.pop().unwrap());
-                self.community_cards.push(self.deck.pop().unwrap());
-            }
-            "Flop" => {
-                self.status = "Turn".to_string();
-                // ターンの1枚をディール
-                self.community_cards.push(self.deck.pop().unwrap());
-            }
-            "River" => {
-                self.status = "Showdown".to_string();
-                // TODO: ショーダウンのロジック
-            }
-            _ => {}
-        }
-
-        // 次のラウンドの準備
-        if self.status != "Showdown" {
-            self.current_bet = 0;
-            for p in &mut self.players {
-                p.current_bet = 0;
-            }
-            // 最初のプレイヤーからターンを再開
-            self.current_turn_username = self
-                .players
-                .iter()
-                .find(|p| p.is_active)
-                .map(|p| p.username.clone());
-        }
     }
 
     // ハンドが終了したかチェックし、終了していればポットを勝者に渡す
