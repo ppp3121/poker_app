@@ -23,6 +23,7 @@ export interface GameState {
   current_turn_username: string | null;
   status: string;
   current_bet: number;
+  dealer_index: number;
 }
 
 // WebSocketで送受信するメッセージの型

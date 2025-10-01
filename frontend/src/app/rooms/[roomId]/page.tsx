@@ -185,7 +185,7 @@ export default function RoomPage() {
         )}
 
         {/* アクションボタンエリア */}
-        {gameState && gameState.current_turn_username === username && (
+        {gameState && gameState.current_turn_username === username && myPlayerState && (
           <div style={{ marginTop: '1rem', padding: '1rem', border: '2px solid lightgreen' }}>
             <h2>Your Turn!</h2>
             <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem' }}>
@@ -231,16 +231,22 @@ export default function RoomPage() {
           <hr />
           <h3>Players:</h3>
           <ul>
-            {gameState?.players.map(p => {
+            {gameState?.players.map((p, index) => {
               let color = '#DDD';
               if (p.username === gameState.current_turn_username) {
                 color = 'lightgreen';
               } else if (!p.is_active && gameState.status !== 'Waiting') {
                 color = 'grey';
               }
+
+              const isDealer = index === gameState.dealer_index;
+              const isSB = index === (gameState.dealer_index + 1) % gameState.players.length;
+              const isBB = index === (gameState.dealer_index + 2) % gameState.players.length;
+
               return (
-                <li key={p.username} style={{ color }}>
-                  {p.username} (Stack: {p.stack})
+                <li key={p.username} style={{ color, fontWeight: isDealer ? 'bold' : 'normal' }}>
+                  {isDealer && 'D '}{isSB && 'SB '}{isBB && 'BB '}
+                  {p.username} (Stack: {p.stack}) [Bet: {p.current_bet}]
                   {p.username === username && ' (You)'}
                   {!p.is_active && gameState.status !== 'Waiting' && ' (Folded)'}
                   {p.username === gameState.current_turn_username && ' (Turn)'}
