@@ -47,6 +47,8 @@ pub struct GameState {
     pub current_turn_username: Option<String>,
     pub status: String, // e.g., "Waiting", "Pre-flop", "Flop", "Turn", "River", "Showdown"
     pub current_bet: u32,
+    #[serde(skip)] // デッキ情報はクライアントに送らない
+    deck: Vec<String>,
 }
 
 impl GameState {
@@ -59,6 +61,7 @@ impl GameState {
             current_turn_username: None,
             status: "Waiting".to_string(),
             current_bet: 0,
+            deck: Vec::new(),
         }
     }
 
@@ -81,12 +84,12 @@ impl GameState {
             return; // 待機中でなければ開始しない
         }
 
-        let mut deck = create_deck();
-        deck.shuffle(&mut thread_rng());
+        self.deck = create_deck();
+        self.deck.shuffle(&mut thread_rng());
 
         // 手札を配る
         for player in &mut self.players {
-            player.hand = vec![deck.pop().unwrap(), deck.pop().unwrap()];
+            player.hand = vec![self.deck.pop().unwrap(), self.deck.pop().unwrap()];
             player.is_active = true;
             player.current_bet = 0;
         }
@@ -96,32 +99,6 @@ impl GameState {
         self.pot = 0;
         self.current_bet = 0;
         self.current_turn_username = self.players.get(0).map(|p| p.username.clone());
-    }
-
-    // ターンを次のアクティブなプレイヤーに進める
-    fn advance_turn(&mut self) {
-        let current_turn_username = match self.current_turn_username.clone() {
-            Some(name) => name,
-            None => return,
-        };
-
-        let current_index = self
-            .players
-            .iter()
-            .position(|p| p.username == current_turn_username);
-
-        if let Some(index) = current_index {
-            // 次のアクティブなプレイヤーを探す
-            for i in 1..=self.players.len() {
-                let next_index = (index + i) % self.players.len();
-                if self.players[next_index].is_active {
-                    self.current_turn_username = Some(self.players[next_index].username.clone());
-                    return;
-                }
-            }
-        }
-        // アクティブなプレイヤーが一人しかいない場合など
-        self.current_turn_username = None;
     }
 
     // プレイヤーのアクションを処理する
@@ -173,7 +150,58 @@ impl GameState {
             return;
         }
 
-        self.advance_turn();
+        // ベッティングラウンド終了チェック
+        if self.check_betting_round_over() {
+            self.proceed_to_next_stage();
+        } else {
+            self.advance_turn();
+        }
+    }
+
+    // ベッティングラウンドが終了したか判定
+    fn check_betting_round_over(&self) -> bool {
+        // アクティブなプレイヤー全員が同じ額をベットしていればラウンド終了
+        self.players
+            .iter()
+            .filter(|p| p.is_active)
+            .all(|p| p.current_bet == self.current_bet)
+    }
+
+    // ゲームを次のステージへ進める
+    fn proceed_to_next_stage(&mut self) {
+        match self.status.as_str() {
+            "Pre-flop" => {
+                self.status = "Flop".to_string();
+                // フロップの3枚をディール
+                self.community_cards.push(self.deck.pop().unwrap());
+                self.community_cards.push(self.deck.pop().unwrap());
+                self.community_cards.push(self.deck.pop().unwrap());
+            }
+            "Flop" => {
+                self.status = "Turn".to_string();
+                // ターンの1枚をディール
+                self.community_cards.push(self.deck.pop().unwrap());
+            }
+            "River" => {
+                self.status = "Showdown".to_string();
+                // TODO: ショーダウンのロジック
+            }
+            _ => {}
+        }
+
+        // 次のラウンドの準備
+        if self.status != "Showdown" {
+            self.current_bet = 0;
+            for p in &mut self.players {
+                p.current_bet = 0;
+            }
+            // 最初のプレイヤーからターンを再開
+            self.current_turn_username = self
+                .players
+                .iter()
+                .find(|p| p.is_active)
+                .map(|p| p.username.clone());
+        }
     }
 
     // ハンドが終了したかチェックし、終了していればポットを勝者に渡す
@@ -200,6 +228,32 @@ impl GameState {
             return true;
         }
         false
+    }
+
+    // ターンを次のアクティブなプレイヤーに進める
+    fn advance_turn(&mut self) {
+        let current_turn_username = match self.current_turn_username.clone() {
+            Some(name) => name,
+            None => return,
+        };
+
+        let current_index = self
+            .players
+            .iter()
+            .position(|p| p.username == current_turn_username);
+
+        if let Some(index) = current_index {
+            // 次のアクティブなプレイヤーを探す
+            for i in 1..=self.players.len() {
+                let next_index = (index + i) % self.players.len();
+                if self.players[next_index].is_active {
+                    self.current_turn_username = Some(self.players[next_index].username.clone());
+                    return;
+                }
+            }
+        }
+        // アクティブなプレイヤーが一人しかいない場合など
+        self.current_turn_username = None;
     }
 
     // 他のプレイヤーに手札情報が見えないようにサニタイズ（無害化）したGameStateを返す
