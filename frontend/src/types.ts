@@ -12,6 +12,7 @@ export interface Player {
   stack: number;
   hand: string[];
   is_active: boolean;
+  current_bet: number;
 }
 
 // ゲーム全体の状態
@@ -21,6 +22,7 @@ export interface GameState {
   pot: number;
   current_turn_username: string | null;
   status: string;
+  current_bet: number;
 }
 
 // WebSocketで送受信するメッセージの型

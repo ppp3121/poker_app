@@ -20,6 +20,7 @@ export default function RoomPage() {
   const [myHand, setMyHand] = useState<string[]>([]);
 
   const [betAmount, setBetAmount] = useState<number>(10);
+  const myPlayerState = gameState?.players.find(p => p.username === username);
 
   // WebSocketメッセージを管理するためのState
   const [chatMessages, setChatMessages] = useState<string[]>([]);
@@ -191,18 +192,31 @@ export default function RoomPage() {
               <button onClick={() => handlePlayerAction({ action: 'Fold' })} style={{ padding: '0.5rem 1rem' }}>
                 フォールド
               </button>
-              <button onClick={() => handlePlayerAction({ action: 'Call' })} style={{ padding: '0.5rem 1rem' }}>
-                コール
-              </button>
-              <input
-                type="number"
-                value={betAmount}
-                onChange={(e) => setBetAmount(Number(e.target.value))}
-                style={{ width: '80px', color: 'black', padding: '0.5rem' }}
-              />
-              <button onClick={() => handlePlayerAction({ action: 'Bet', amount: betAmount })} style={{ padding: '0.5rem 1rem' }}>
-                ベット
-              </button>
+
+              {/* 状況に応じてチェック/コールを出し分け */}
+              {myPlayerState.current_bet < gameState.current_bet ? (
+                <button onClick={() => handlePlayerAction({ action: 'Call' })} style={{ padding: '0.5rem 1rem', backgroundColor: '#2a4' }}>
+                  コール ({gameState.current_bet})
+                </button>
+              ) : (
+                <button onClick={() => handlePlayerAction({ action: 'Call' })} style={{ padding: '0.5rem 1rem', backgroundColor: '#44b' }}>
+                  チェック
+                </button>
+              )}
+
+              {/* ベット/レイズボタン */}
+              <div>
+                <input
+                  type="number"
+                  value={betAmount}
+                  onChange={(e) => setBetAmount(Number(e.target.value))}
+                  style={{ width: '80px', color: 'black', padding: '0.5rem' }}
+                  min={gameState.current_bet * 2} // 簡単なバリデーション
+                />
+                <button onClick={() => handlePlayerAction({ action: 'Bet', amount: betAmount })} style={{ padding: '0.5rem 1rem', backgroundColor: '#c33' }}>
+                  {gameState.current_bet > 0 ? 'レイズ' : 'ベット'}
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -218,7 +232,7 @@ export default function RoomPage() {
           <h3>Players:</h3>
           <ul>
             {gameState?.players.map(p => {
-              let color = 'red';
+              let color = '#DDD';
               if (p.username === gameState.current_turn_username) {
                 color = 'lightgreen';
               } else if (!p.is_active && gameState.status !== 'Waiting') {
