@@ -272,26 +272,31 @@ async fn handle_socket(
                     match serde_json::from_str::<GameMessage>(&text) {
                         Ok(GameMessage::PlayerAction(action)) => {
                             let mut game = game_state_lock.lock().await;
-                            if let PlayerAction::StartGame = action {
-                                game.start_game();
+                            // StartGame以外のPlayerActionはhandle_actionで処理
+                            match action {
+                                PlayerAction::StartGame => {
+                                    game.start_game();
 
-                                // 全プレイヤーに個別に手札を送信
-                                for player in &game.players {
-                                    if let Some(sender) = state.player_senders.get(&player.username) {
-                                        let hand_msg = GameMessage::DealHand(game::DealHandPayload {
-                                            cards: player.hand.clone(),
-                                        });
-                                        let json = serde_json::to_string(&hand_msg).unwrap();
-                                        // mpscチャネル経由で送信
-                                        let _ = sender.send(json).await;
+                                    // 全プレイヤーに個別に手札を送信
+                                    for player in &game.players {
+                                        if let Some(sender) = state.player_senders.get(&player.username) {
+                                            let hand_msg = GameMessage::DealHand(game::DealHandPayload {
+                                                cards: player.hand.clone(),
+                                            });
+                                            let json = serde_json::to_string(&hand_msg).unwrap();
+                                            let _ = sender.send(json).await;
+                                        }
                                     }
+                                },
+                                // ★ Foldなどのアクションを処理
+                                _ => {
+                                    game.handle_action(&username, action);
                                 }
-
-                                // 全員に手札が隠されたゲーム状態をブロードキャスト
-                                let update_msg = GameMessage::GameStateUpdate(game.sanitized());
-                                let json = serde_json::to_string(&update_msg).unwrap();
-                                let _ = broadcast_tx.send(json);
                             }
+                            // ★ 更新されたゲーム状態をブロードキャスト
+                            let update_msg = GameMessage::GameStateUpdate(game.sanitized());
+                            let json = serde_json::to_string(&update_msg).unwrap();
+                            let _ = broadcast_tx.send(json);
                         }
                         Ok(GameMessage::ChatMessage(chat_msg)) => {
                             let _ = broadcast_tx.send(format!("{}: {}", username, chat_msg));

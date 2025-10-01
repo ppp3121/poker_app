@@ -20,7 +20,6 @@ pub enum PlayerAction {
     Fold,
     Call,
     Bet { amount: u32 },
-    Raise { amount: u32 },
 }
 
 // サーバーから特定のプレイヤーに手札を送るためのペイロード
@@ -36,6 +35,7 @@ pub struct Player {
     pub stack: u32,
     pub hand: Vec<String>,
     pub is_active: bool,
+    pub current_bet: u32,
 }
 
 // ゲーム全体の現在の状態
@@ -46,6 +46,7 @@ pub struct GameState {
     pub pot: u32,
     pub current_turn_username: Option<String>,
     pub status: String, // e.g., "Waiting", "Pre-flop", "Flop", "Turn", "River", "Showdown"
+    pub current_bet: u32,
 }
 
 impl GameState {
@@ -57,6 +58,7 @@ impl GameState {
             pot: 0,
             current_turn_username: None,
             status: "Waiting".to_string(),
+            current_bet: 0,
         }
     }
 
@@ -67,7 +69,8 @@ impl GameState {
                 username,
                 stack: 1000, // 初期スタック
                 hand: Vec::new(),
-                is_active: true,
+                is_active: false,
+                current_bet: 0,
             });
         }
     }
@@ -85,20 +88,124 @@ impl GameState {
         for player in &mut self.players {
             player.hand = vec![deck.pop().unwrap(), deck.pop().unwrap()];
             player.is_active = true;
+            player.current_bet = 0;
         }
 
         self.status = "Pre-flop".to_string();
         self.community_cards.clear();
         self.pot = 0;
-        // TODO: ブラインドの処理、最初のターンのプレイヤー決定などを追加
+        self.current_bet = 0;
         self.current_turn_username = self.players.get(0).map(|p| p.username.clone());
+    }
+
+    // ターンを次のアクティブなプレイヤーに進める
+    fn advance_turn(&mut self) {
+        let current_turn_username = match self.current_turn_username.clone() {
+            Some(name) => name,
+            None => return,
+        };
+
+        let current_index = self
+            .players
+            .iter()
+            .position(|p| p.username == current_turn_username);
+
+        if let Some(index) = current_index {
+            // 次のアクティブなプレイヤーを探す
+            for i in 1..=self.players.len() {
+                let next_index = (index + i) % self.players.len();
+                if self.players[next_index].is_active {
+                    self.current_turn_username = Some(self.players[next_index].username.clone());
+                    return;
+                }
+            }
+        }
+        // アクティブなプレイヤーが一人しかいない場合など
+        self.current_turn_username = None;
+    }
+
+    // プレイヤーのアクションを処理する
+    pub fn handle_action(&mut self, username: &str, action: PlayerAction) {
+        if self.current_turn_username.as_deref() != Some(username) {
+            return;
+        }
+
+        let player_index = self
+            .players
+            .iter()
+            .position(|p| p.username == username)
+            .unwrap();
+
+        match action {
+            PlayerAction::Fold => {
+                self.players[player_index].is_active = false;
+            }
+            PlayerAction::Call => {
+                let to_call = self.current_bet - self.players[player_index].current_bet;
+                if to_call > 0 && self.players[player_index].stack >= to_call {
+                    let player = &mut self.players[player_index];
+                    player.stack -= to_call;
+                    player.current_bet += to_call;
+                    self.pot += to_call;
+                }
+            }
+            PlayerAction::Bet { amount } => {
+                // ベット額が現在のベット額以上か、かつスタックの範囲内かチェック
+                if amount >= self.current_bet
+                    && self.players[player_index].stack
+                        >= (amount - self.players[player_index].current_bet)
+                {
+                    let player = &mut self.players[player_index];
+                    let bet_increase = amount - player.current_bet;
+                    player.stack -= bet_increase;
+                    player.current_bet = amount;
+                    self.pot += bet_increase;
+                    self.current_bet = amount;
+                } else {
+                    return; // 無効なベット
+                }
+            }
+            _ => {}
+        }
+
+        // ハンドが終了したかチェック
+        if self.check_hand_over() {
+            return;
+        }
+
+        self.advance_turn();
+    }
+
+    // ハンドが終了したかチェックし、終了していればポットを勝者に渡す
+    fn check_hand_over(&mut self) -> bool {
+        let active_players: Vec<_> = self.players.iter().filter(|p| p.is_active).collect();
+        if active_players.len() == 1 {
+            let winner_username = active_players[0].username.clone();
+            if let Some(winner) = self
+                .players
+                .iter_mut()
+                .find(|p| p.username == winner_username)
+            {
+                winner.stack += self.pot;
+            }
+            // ゲーム状態をリセットして次のゲームを待つ
+            self.status = "Waiting".to_string();
+            self.current_turn_username = None;
+            self.pot = 0;
+            self.current_bet = 0;
+            for p in &mut self.players {
+                p.is_active = false;
+                p.hand.clear();
+            }
+            return true;
+        }
+        false
     }
 
     // 他のプレイヤーに手札情報が見えないようにサニタイズ（無害化）したGameStateを返す
     pub fn sanitized(&self) -> Self {
         let mut sanitized_state = self.clone();
         for player in &mut sanitized_state.players {
-            // 手札を空のVecで上書きする
             player.hand = Vec::new();
         }
         sanitized_state
