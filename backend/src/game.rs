@@ -1,3 +1,4 @@
+use crate::hand_evaluator::{self, HandRank};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -231,38 +232,35 @@ impl GameState {
 
     // 勝者を決定する（簡易的なハイカード判定）
     fn determine_winner(&mut self) {
-        let active_players: Vec<_> = self.players.iter_mut().filter(|p| p.is_active).collect();
-
-        if active_players.is_empty() {
-            return;
-        }
-
-        // ここに本格的な役判定ロジックが入るが、今回は簡易的にハイカードで勝敗を決める
-        // カードの強さ: T=10, J=11, Q=12, K=13, A=14
-        let get_card_value = |card: &str| -> u32 {
-            match &card[0..1] {
-                "T" => 10,
-                "J" => 11,
-                "Q" => 12,
-                "K" => 13,
-                "A" => 14,
-                c => c.parse().unwrap_or(0),
-            }
-        };
-
-        let mut winner = active_players[0].username.clone();
-        let mut max_value = 0;
+        let mut best_rank: Option<HandRank> = None;
+        let mut winners: Vec<String> = Vec::new();
 
         for player in self.players.iter().filter(|p| p.is_active) {
-            let hand_value = get_card_value(&player.hand[0]) + get_card_value(&player.hand[1]);
-            if hand_value > max_value {
-                max_value = hand_value;
-                winner = player.username.clone();
+            let mut seven_cards_str: Vec<String> = self.community_cards.clone();
+            seven_cards_str.extend(player.hand.clone());
+
+            let cards = hand_evaluator::parse_cards(&seven_cards_str);
+            if let Some(current_rank) = hand_evaluator::evaluate_hand(&cards) {
+                if best_rank.is_none() || current_rank > *best_rank.as_ref().unwrap() {
+                    best_rank = Some(current_rank);
+                    winners.clear();
+                    winners.push(player.username.clone());
+                } else if current_rank == *best_rank.as_ref().unwrap() {
+                    // 引き分けの場合
+                    winners.push(player.username.clone());
+                }
             }
         }
 
-        if let Some(winner_player) = self.players.iter_mut().find(|p| p.username == winner) {
-            winner_player.stack += self.pot;
+        if !winners.is_empty() {
+            let pot_share = self.pot / winners.len() as u32;
+            for winner_name in winners {
+                if let Some(winner_player) =
+                    self.players.iter_mut().find(|p| p.username == winner_name)
+                {
+                    winner_player.stack += pot_share;
+                }
+            }
         }
 
         self.status = "Waiting".to_string();

@@ -27,6 +27,7 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use tower_http::cors::CorsLayer;
 
 mod game;
+mod hand_evaluator;
 
 // --- 構造体の定義 ---
 
