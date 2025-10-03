@@ -21,6 +21,7 @@ export default function RoomPage() {
 
   const [betAmount, setBetAmount] = useState<number>(10);
   const myPlayerState = gameState?.players.find(p => p.username === username);
+  const handleNextHand = () => handlePlayerAction({ action: 'NextHand' });
 
   // WebSocketメッセージを管理するためのState
   const [chatMessages, setChatMessages] = useState<string[]>([]);
@@ -184,6 +185,17 @@ export default function RoomPage() {
           </button>
         )}
 
+        {/* ショーダウン時の表示 */}
+        {gameState?.status === 'Showdown' && (
+          <div style={{ marginTop: '1rem', padding: '1rem', border: '2px solid yellow', backgroundColor: '#330' }}>
+            <h2>ショーダウン</h2>
+            <p style={{ color: 'yellow', fontSize: '1.2rem' }}>{gameState.winner_message}</p>
+            <button onClick={handleNextHand} style={{ padding: '0.5rem 1rem', marginTop: '1rem' }}>
+              次のハンドへ
+            </button>
+          </div>
+        )}
+
         {/* アクションボタンエリア */}
         {gameState && gameState.current_turn_username === username && myPlayerState && (
           <div style={{ marginTop: '1rem', padding: '1rem', border: '2px solid lightgreen' }}>
@@ -247,6 +259,8 @@ export default function RoomPage() {
                 <li key={p.username} style={{ color, fontWeight: isDealer ? 'bold' : 'normal' }}>
                   {isDealer && 'D '}{isSB && 'SB '}{isBB && 'BB '}
                   {p.username} (Stack: {p.stack}) [Bet: {p.current_bet}]
+                  {/* ショーダウン時に手札を表示 */}
+                  {gameState.status === 'Showdown' && p.hand.length > 0 && ` [Hand: ${p.hand.join(', ')}]`}
                   {p.username === username && ' (You)'}
                   {!p.is_active && gameState.status !== 'Waiting' && ' (Folded)'}
                   {p.username === gameState.current_turn_username && ' (Turn)'}
