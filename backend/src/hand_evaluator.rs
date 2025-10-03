@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Suit {
@@ -56,6 +57,23 @@ pub enum HandRank {
     FourOfAKind(Rank, Rank),
     StraightFlush(Rank),
     RoyalFlush,
+}
+
+impl fmt::Display for HandRank {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            HandRank::RoyalFlush => write!(f, "ロイヤルフラッシュ"),
+            HandRank::StraightFlush(_) => write!(f, "ストレートフラッシュ"),
+            HandRank::FourOfAKind(_, _) => write!(f, "フォーカード"),
+            HandRank::FullHouse(_, _) => write!(f, "フルハウス"),
+            HandRank::Flush(_, _, _, _, _) => write!(f, "フラッシュ"),
+            HandRank::Straight(_) => write!(f, "ストレート"),
+            HandRank::ThreeOfAKind(_, _, _) => write!(f, "スリーカード"),
+            HandRank::TwoPair(_, _, _) => write!(f, "ツーペア"),
+            HandRank::OnePair(_, _, _, _) => write!(f, "ワンペア"),
+            HandRank::HighCard(_, _, _, _, _) => write!(f, "ハイカード"),
+        }
+    }
 }
 
 // カードの文字列("As", "Td", "7c")をCard構造体に変換

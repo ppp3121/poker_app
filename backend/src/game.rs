@@ -23,6 +23,7 @@ pub enum PlayerAction {
     Fold,
     Call,
     Bet { amount: u32 },
+    NextHand,
 }
 
 // サーバーから特定のプレイヤーに手札を送るためのペイロード
@@ -51,6 +52,7 @@ pub struct GameState {
     pub status: String, // e.g., "Waiting", "Pre-flop", "Flop", "Turn", "River", "Showdown"
     pub current_bet: u32,
     pub dealer_index: usize,
+    pub winner_message: Option<String>,
     #[serde(skip)] // デッキ情報はクライアントに送らない
     deck: Vec<String>,
 }
@@ -66,6 +68,7 @@ impl GameState {
             status: "Waiting".to_string(),
             current_bet: 0,
             dealer_index: 0,
+            winner_message: None,
             deck: Vec::new(),
         }
     }
@@ -88,6 +91,7 @@ impl GameState {
         if self.status != "Waiting" || self.players.len() < 2 {
             return; // 待機中でなければ開始しない
         }
+        self.winner_message = None;
 
         self.dealer_index = (self.dealer_index + 1) % self.players.len();
 
@@ -136,6 +140,16 @@ impl GameState {
     // プレイヤーのアクションを処理する
     pub fn handle_action(&mut self, username: &str, action: PlayerAction) {
         if self.current_turn_username.as_deref() != Some(username) {
+            return;
+        }
+
+        if let PlayerAction::NextHand = action {
+            if self.status == "Showdown" {
+                self.status = "Waiting".to_string();
+                for p in &mut self.players {
+                    p.hand.clear();
+                }
+            }
             return;
         }
 
@@ -254,6 +268,14 @@ impl GameState {
 
         if !winners.is_empty() {
             let pot_share = self.pot / winners.len() as u32;
+            let winner_names = winners.join(", ");
+            let message = format!(
+                "{}が{}でポット{}を獲得しました。",
+                winner_names,
+                best_rank.as_ref().unwrap(),
+                self.pot
+            );
+            self.winner_message = Some(message);
             for winner_name in winners {
                 if let Some(winner_player) =
                     self.players.iter_mut().find(|p| p.username == winner_name)
@@ -263,7 +285,6 @@ impl GameState {
             }
         }
 
-        self.status = "Waiting".to_string();
         self.current_turn_username = None;
     }
 
@@ -330,6 +351,10 @@ impl GameState {
 
     // 他のプレイヤーに手札情報が見えないようにサニタイズ（無害化）したGameStateを返す
     pub fn sanitized(&self) -> Self {
+        if self.status == "Showdown" {
+            return self.clone();
+        }
+
         let mut sanitized_state = self.clone();
         for player in &mut sanitized_state.players {
             player.hand = Vec::new();
